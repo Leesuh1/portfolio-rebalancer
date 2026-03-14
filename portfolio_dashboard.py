@@ -735,6 +735,7 @@ def write_web_snapshot(
     invest_amount: int,
     profile: str,
     selected_count: int,
+    selected_gicodes: list[str],
 ) -> Path:
     OUTPUT_DIR.mkdir(exist_ok=True)
     snapshot_path = OUTPUT_DIR / "dashboard_data.json"
@@ -747,7 +748,11 @@ def write_web_snapshot(
         "profile": profile,
         "investAmount": invest_amount,
         "selectedStockCount": selected_count,
+        "selectedGicodes": selected_gicodes,
         "excludedStocks": incomplete_list,
+        "selectionPresets": {
+            "현재 기본 포트폴리오": get_top30_gicodes(),
+        },
         "summary": {
             "rankedCount": int(len(ranked_df)),
             "excludedCount": int(len(incomplete_list)),
@@ -759,6 +764,7 @@ def write_web_snapshot(
         ].to_dict(orient="records"),
         "allRankings": ranked_df[
             [
+                "종목코드",
                 "랭킹",
                 "종목명",
                 "종합점수_100",
@@ -773,6 +779,7 @@ def write_web_snapshot(
                 "순이익_PER",
             ]
         ].to_dict(orient="records"),
+        "stockUniverse": ranked_df[["종목코드", "종목명"]].to_dict(orient="records"),
     }
 
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -805,6 +812,7 @@ def main() -> None:
         invest_amount=invest_amount,
         profile=profile,
         selected_count=len(get_top30_gicodes()),
+        selected_gicodes=get_top30_gicodes(),
     )
     dashboard_path = write_dashboard(ranked_df, portfolio_df, bar_fig, bubble_fig, heatmap_fig)
 

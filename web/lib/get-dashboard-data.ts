@@ -10,6 +10,7 @@ type PortfolioRow = {
 };
 
 type RankingRow = {
+  "종목코드": string;
   "랭킹": number;
   "종목명": string;
   "종합점수_100": number;
@@ -23,7 +24,9 @@ export type DashboardData = {
   profile: string;
   investAmount: number;
   selectedStockCount: number;
+  selectedGicodes: string[];
   excludedStocks: string[];
+  selectionPresets: Record<string, string[]>;
   summary: {
     rankedCount: number;
     excludedCount: number;
@@ -31,6 +34,11 @@ export type DashboardData = {
   };
   topPortfolio: PortfolioRow[];
   topRankings: RankingRow[];
+  allRankings: RankingRow[];
+  stockUniverse: Array<{
+    "종목코드": string;
+    "종목명": string;
+  }>;
 };
 
 const fallbackData: DashboardData = {
@@ -38,14 +46,18 @@ const fallbackData: DashboardData = {
   profile: "균형형",
   investAmount: 10_000_000,
   selectedStockCount: 0,
+  selectedGicodes: [],
   excludedStocks: [],
+  selectionPresets: {},
   summary: {
     rankedCount: 0,
     excludedCount: 0,
     topScore: 0
   },
   topPortfolio: [],
-  topRankings: []
+  topRankings: [],
+  allRankings: [],
+  stockUniverse: []
 };
 
 export async function getDashboardData(): Promise<DashboardData> {
