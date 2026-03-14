@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+from io import StringIO
 import json
 from pathlib import Path
 
@@ -24,6 +26,24 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 WEB_PUBLIC_DATA_DIR = BASE_DIR / "web" / "public" / "data"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 20
+ETF_NAME_KEYWORDS = (
+    "ETF",
+    "ETN",
+    "KODEX",
+    "TIGER",
+    "KOSEF",
+    "KBSTAR",
+    "ARIRANG",
+    "HANARO",
+    "ACE",
+    "RISE",
+    "SOL",
+    "TIMEFOLIO",
+    "PLUS",
+    "TREX",
+    "WOORI",
+    "FOCUS",
+)
 DEFAULT_TICKERS = [
     "005930",
     "000660",
@@ -54,25 +74,36 @@ DEFAULT_TICKERS = [
     "058470",
     "357780",
     "090430",
+    "105560",
+    "055550",
+    "086790",
+    "032830",
+    "006800",
+    "071050",
+    "316140",
+    "138040",
+    "017670",
+    "030200",
+    "003490",
 ]
 PROFILE_WEIGHTS = {
     "안정형": {
-        "영업성장": 0.15,
-        "순이익성장": 0.20,
-        "영업PER": 0.325,
-        "순이익PER": 0.325,
+        "성장": 0.20,
+        "가치": 0.30,
+        "ROE": 0.20,
+        "순현금": 0.30,
     },
     "균형형": {
-        "영업성장": 0.25,
-        "순이익성장": 0.25,
-        "영업PER": 0.25,
-        "순이익PER": 0.25,
+        "성장": 0.25,
+        "가치": 0.25,
+        "ROE": 0.25,
+        "순현금": 0.25,
     },
     "공격형": {
-        "영업성장": 0.325,
-        "순이익성장": 0.325,
-        "영업PER": 0.175,
-        "순이익PER": 0.175,
+        "성장": 0.35,
+        "가치": 0.20,
+        "ROE": 0.30,
+        "순현금": 0.15,
     },
 }
 
@@ -90,20 +121,22 @@ def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tup
 
     rows = table_y.find_all("tr")
     raw_data: dict[str, list[int | None]] = {}
+    revenue_aliases = {"매출액", "영업수익", "이자수익", "순영업수익"}
 
     for row in rows:
         th = row.find("th")
         if not th:
             continue
         item = th.get_text(strip=True)
-        if item not in target_items:
+        normalized_item = "매출액" if item in revenue_aliases else item
+        if normalized_item not in target_items:
             continue
 
         values = []
         for td in row.find_all("td"):
             text = td.get_text(strip=True).replace(",", "")
             values.append(int(text) if text else None)
-        raw_data[item] = values
+        raw_data[normalized_item] = values
 
     this_year = int(
         html.find("tr", class_="td_gapcolor2")
@@ -112,7 +145,11 @@ def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tup
         .split("/")[0]
     )
 
-    years = list(range(this_year - 5, this_year - 5 + len(raw_data["매출액"])))
+    year_anchor_key = next((key for key in ["매출액", "영업이익", "당기순이익"] if key in raw_data), None)
+    if year_anchor_key is None:
+        raise KeyError("연간 재무 핵심 항목 없음")
+
+    years = list(range(this_year - 5, this_year - 5 + len(raw_data[year_anchor_key])))
     operating_profit = [
         raw_data["영업이익(발표기준)"][i] if year < this_year else raw_data["영업이익"][i]
         for i, year in enumerate(years)
@@ -142,82 +179,261 @@ def get_reference_date() -> str:
         return datetime.now().strftime("%Y%m%d")
 
     today = datetime.now()
-    for offset in range(0, 800):
+    try:
+        response = requests.head("https://www.google.com", timeout=5)
+        header_date = response.headers.get("Date")
+        if header_date:
+            today = parsedate_to_datetime(header_date).astimezone().replace(tzinfo=None)
+    except Exception:
+        pass
+
+    coarse_hit = None
+    for offset in range(0, 420, 7):
         candidate = (today - timedelta(days=offset)).strftime("%Y%m%d")
         try:
             cap_df = stock.get_market_cap_by_ticker(candidate)
             if not cap_df.empty and "시가총액" in cap_df.columns:
-                return candidate
+                coarse_hit = today - timedelta(days=offset)
+                break
         except Exception:
             continue
+
+    if coarse_hit is not None:
+        for offset in range(0, 7):
+            candidate_dt = coarse_hit + timedelta(days=offset)
+            candidate = candidate_dt.strftime("%Y%m%d")
+            try:
+                cap_df = stock.get_market_cap_by_ticker(candidate)
+                if not cap_df.empty and "시가총액" in cap_df.columns:
+                    return candidate
+            except Exception:
+                continue
+
     return datetime.now().strftime("%Y%m%d")
 
 
 def get_market_universe(market: str) -> pd.DataFrame:
-    if stock is None:
-        raise RuntimeError("pykrx가 설치되지 않아 시장 전체 종목 목록을 불러올 수 없습니다.")
+    market_type_map = {
+        "KOSPI": "stockMkt",
+        "KOSDAQ": "kosdaqMkt",
+    }
+    market_type = market_type_map.get(market)
+    if market_type is None:
+        raise ValueError(f"지원하지 않는 시장입니다: {market}")
 
-    reference_date = get_reference_date()
-    tickers = stock.get_market_ticker_list(reference_date, market=market)
-    rows = []
-    for ticker in tickers:
-        rows.append(
-            {
-                "ticker": ticker,
-                "gicode": f"A{ticker}",
-                "name": stock.get_market_ticker_name(ticker),
-                "market": market,
-            }
-        )
-    return pd.DataFrame(rows).sort_values(["name", "ticker"]).reset_index(drop=True)
-
-
-def get_market_top_gicodes(market: str, top_n: int = 30) -> list[str]:
-    if stock is None:
-        raise RuntimeError("pykrx가 설치되지 않아 시가총액 기준 상위 종목을 계산할 수 없습니다.")
-
-    reference_date = get_reference_date()
-    caps = stock.get_market_cap_by_ticker(reference_date)
-    universe = get_market_universe(market).set_index("ticker")
-    top_df = (
-        caps.join(universe, how="inner")
-        .sort_values("시가총액", ascending=False)
-        .head(top_n)
-        .reset_index()
+    url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType={market_type}"
+    response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    response.encoding = "euc-kr"
+    df = pd.read_html(StringIO(response.text), flavor="lxml")[0]
+    df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+    universe = pd.DataFrame(
+        {
+            "ticker": df["종목코드"],
+            "gicode": "A" + df["종목코드"],
+            "name": df["회사명"],
+            "market": market,
+        }
     )
-    return [f"A{ticker}" for ticker in top_df["ticker"].tolist()]
+    return universe.sort_values(["name", "ticker"]).reset_index(drop=True)
+
+
+def get_market_gicodes(market: str) -> list[str]:
+    return get_market_ranked_snapshot(market)["gicode"].tolist()
+
+
+def get_market_ranked_snapshot(market: str) -> pd.DataFrame:
+    sosok_map = {
+        "KOSPI": "0",
+        "KOSDAQ": "1",
+    }
+    sosok = sosok_map.get(market)
+    if sosok is None:
+        raise ValueError(f"지원하지 않는 시장입니다: {market}")
+
+    rows: list[dict[str, object]] = []
+    page = 1
+    rank = 1
+
+    while True:
+        url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        table_rows = soup.select("table.type_2 tr")
+
+        page_added = 0
+        for row in table_rows:
+            link = row.select_one("a.tltle")
+            cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
+            if link is None or len(cells) < 7:
+                continue
+
+            href = link.get("href", "")
+            if "code=" not in href:
+                continue
+
+            code = href.split("code=")[-1][:6]
+            name = link.get_text(strip=True)
+            if any(keyword in name.upper() for keyword in ETF_NAME_KEYWORDS):
+                continue
+            market_cap_text = cells[6].replace(",", "")
+            try:
+                market_cap = float(market_cap_text)
+            except ValueError:
+                market_cap = np.nan
+
+            rows.append(
+                {
+                    "ticker": code,
+                    "gicode": f"A{code}",
+                    "name": name,
+                    "market": market,
+                    "market_cap": market_cap,
+                    "market_rank": rank,
+                }
+            )
+            rank += 1
+            page_added += 1
+
+        if page_added == 0:
+            break
+        page += 1
+
+    return pd.DataFrame(rows)
+
+
+def get_market_top_gicodes(market: str, top_n: int | None = 30) -> list[str]:
+    ranked = get_market_ranked_snapshot(market)
+    gicodes = ranked["gicode"].tolist()
+    return gicodes[:top_n] if top_n is not None else gicodes
 
 
 def get_selection_presets() -> dict[str, list[str]]:
-    presets = {"현재 기본 포트폴리오": get_top30_gicodes()}
-    if stock is None:
-        return presets
-
+    presets = {"기본 관심 종목": get_top30_gicodes()}
     try:
-        presets["KOSPI Top 30"] = get_market_top_gicodes("KOSPI", top_n=30)
-        presets["KOSDAQ Top 30"] = get_market_top_gicodes("KOSDAQ", top_n=30)
-        presets["KOSPI 전체"] = get_market_universe("KOSPI")["gicode"].tolist()
-        presets["KOSDAQ 전체"] = get_market_universe("KOSDAQ")["gicode"].tolist()
+        presets["코스피 대표 30개"] = get_market_top_gicodes("KOSPI", top_n=30)
     except Exception:
-        return presets
+        pass
+    try:
+        presets["코스닥 대표 20개"] = get_market_top_gicodes("KOSDAQ", top_n=20)
+    except Exception:
+        pass
+    try:
+        presets["코스피 전체"] = get_market_gicodes("KOSPI")
+    except Exception:
+        pass
+    try:
+        presets["코스닥 전체"] = get_market_gicodes("KOSDAQ")
+    except Exception:
+        pass
+    kospi_all = presets.get("코스피 전체", [])
+    kosdaq_all = presets.get("코스닥 전체", [])
+    if kospi_all or kosdaq_all:
+        presets["코스피+코스닥 전체"] = [*kospi_all, *[code for code in kosdaq_all if code not in set(kospi_all)]]
     return presets
 
 
-def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, list[str]]:
+def build_stock_universe(selection_presets: dict[str, list[str]], ranked_df: pd.DataFrame) -> pd.DataFrame:
+    ranked_frames = [get_market_ranked_snapshot("KOSPI"), get_market_ranked_snapshot("KOSDAQ")]
+    combined_ranked = pd.concat(ranked_frames, ignore_index=True)
+    combined_ranked["통합시총순위"] = combined_ranked["market_cap"].rank(
+        method="first", ascending=False
+    )
+
+    market_ranked = combined_ranked.rename(
+        columns={
+            "gicode": "종목코드",
+            "name": "종목명",
+            "market": "시장",
+            "market_rank": "시장시총순위",
+            "market_cap": "시가총액",
+        }
+    )
+    combined = market_ranked[["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액"]].copy()
+
+    ranked_subset = pd.DataFrame(columns=["종목코드", "현재가"])
+    if not ranked_df.empty:
+        ranked_subset = ranked_df[["종목코드", "현재가"]].drop_duplicates("종목코드")
+
+    combined = combined.merge(ranked_subset, on="종목코드", how="left")
+    preset_codes = {code for codes in selection_presets.values() for code in codes}
+    filtered = combined[combined["종목코드"].isin(preset_codes)].copy()
+    filtered = filtered.drop_duplicates("종목코드")
+    return filtered.sort_values(["통합시총순위", "시장시총순위", "종목명"]).reset_index(drop=True)
+
+
+def get_snapshot_batch_gicodes() -> list[str]:
+    selection_presets = get_selection_presets()
+    codes: list[str] = []
+    for preset_name in ["기본 관심 종목", "코스피 대표 30개", "코스닥 대표 20개"]:
+        for code in selection_presets.get(preset_name, []):
+            if code not in codes:
+                codes.append(code)
+    return codes
+
+
+def get_market_code_name_map() -> dict[str, str]:
+    code_name_map: dict[str, str] = {}
+    for market in ["KOSPI", "KOSDAQ"]:
+        ranked_snapshot = get_market_ranked_snapshot(market)
+        for row in ranked_snapshot[["gicode", "name"]].to_dict(orient="records"):
+            code_name_map[row["gicode"]] = row["name"]
+    return code_name_map
+
+
+def pick_forecast_value(stock_df: pd.DataFrame, column: str, this_year: int) -> tuple[float | None, int | None]:
+    forecast_candidates = stock_df[stock_df["연도"] >= this_year].sort_values("연도")
+    if forecast_candidates.empty:
+        return None, None
+
+    preferred_years = [this_year + 2, this_year + 1, this_year]
+    for target_year in preferred_years:
+        matched = forecast_candidates[forecast_candidates["연도"] == target_year]
+        if matched.empty:
+            continue
+        value = matched.iloc[0][column]
+        if pd.notna(value):
+            return float(value), int(target_year)
+
+    first_valid = forecast_candidates[forecast_candidates[column].notna()]
+    if first_valid.empty:
+        return None, None
+
+    row = first_valid.iloc[0]
+    return float(row[column]), int(row["연도"])
+
+
+def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, list[str], dict[str, str]]:
     incomplete_stocks: list[str] = []
+    incomplete_reasons: dict[str, str] = {}
     all_results: list[pd.DataFrame] = []
 
     for gicode in gicodes or get_top30_gicodes():
         try:
             html = load_fnguide_html(gicode)
             stock_name = html.find("h1").get_text(strip=True)
-            yearly_df, _ = parse_yearly_financials(
+            yearly_df, this_year = parse_yearly_financials(
                 html, ["매출액", "영업이익", "영업이익(발표기준)", "당기순이익"]
             )
 
-            if yearly_df[["매출액", "영업이익", "당기순이익"]].isna().any().any():
+            operating_forecast, operating_year = pick_forecast_value(yearly_df, "영업이익", this_year)
+            net_forecast, net_year = pick_forecast_value(yearly_df, "당기순이익", this_year)
+
+            if operating_forecast is None or net_forecast is None:
                 incomplete_stocks.append(stock_name)
+                missing_items: list[str] = []
+                if operating_forecast is None:
+                    missing_items.append("영업이익")
+                if net_forecast is None:
+                    missing_items.append("당기순이익")
+                incomplete_reasons[stock_name] = f"{'·'.join(missing_items)} 전망치 없음"
             else:
+                yearly_df["기준연도"] = this_year
+                yearly_df["적용 영업이익(E)"] = operating_forecast
+                yearly_df["적용 영업이익 기준연도"] = operating_year
+                yearly_df["적용 당기순이익(E)"] = net_forecast
+                yearly_df["적용 당기순이익 기준연도"] = net_year
                 yearly_df["종목코드"] = gicode
                 yearly_df["종목명"] = stock_name
                 all_results.append(yearly_df)
@@ -226,37 +442,34 @@ def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, lis
         except Exception as exc:
             print(f"error: {gicode} -> {exc}")
             incomplete_stocks.append(gicode)
+            incomplete_reasons[gicode] = "데이터 파싱 오류"
 
     final_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
-    return final_df, incomplete_stocks
+    return final_df, incomplete_stocks, incomplete_reasons
 
 
-def calc_3y_avg_growth(series: pd.Series) -> float:
-    valid_values = series.dropna()
-    if len(valid_values) < 4:
+def calc_avg_growth(start: float, end: float, years: int) -> float:
+    if pd.isna(start) or pd.isna(end) or years <= 0:
         return np.nan
-
-    start = valid_values.iloc[0]
-    end = valid_values.iloc[-1]
 
     if end < 0:
         return np.nan
 
     if start > 0 and end > 0:
-        return (end / start) ** (1 / 3) - 1
+        return (end / start) ** (1 / years) - 1
 
-    scale = np.mean(np.abs(valid_values))
+    scale = np.mean(np.abs([start, end]))
     if scale == 0:
         return np.nan
 
-    shift = abs(valid_values.min()) + scale
+    shift = abs(min(start, end)) + scale
     shifted_start = start + shift
     shifted_end = end + shift
 
     if shifted_start <= 0:
         return np.nan
 
-    return (shifted_end / shifted_start) ** (1 / 3) - 1
+    return (shifted_end / shifted_start) ** (1 / years) - 1
 
 
 def get_market_cap(gicode: str) -> float:
@@ -270,6 +483,77 @@ def get_market_cap(gicode: str) -> float:
         return np.nan
 
 
+def get_current_price(gicode: str) -> float:
+    ticker = gicode.replace("A", "")
+    url = f"https://finance.naver.com/item/main.naver?code={ticker}"
+    try:
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        blind = soup.select_one("p.no_today span.blind")
+        if blind is None:
+            return np.nan
+        return float(blind.get_text(strip=True).replace(",", ""))
+    except Exception:
+        return np.nan
+
+
+def get_finance_ratio_table(gicode: str) -> pd.DataFrame:
+    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_FinanceRatio.asp?pGB=1&gicode={gicode}"
+    response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    tables = pd.read_html(StringIO(response.text))
+    if not tables:
+        raise ValueError("재무비율 테이블 없음")
+    return tables[0]
+
+
+def extract_latest_metric(table: pd.DataFrame, keywords: list[str]) -> float:
+    labels = table.iloc[:, 0].astype(str)
+    row = table[labels.apply(lambda label: any(keyword in label for keyword in keywords))]
+    if row.empty:
+        return np.nan
+    values = pd.to_numeric(row.iloc[0, 1:], errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    return float(values.iloc[-1])
+
+
+def get_quality_metrics(gicode: str) -> dict[str, float | str]:
+    try:
+        ratio_table = get_finance_ratio_table(gicode)
+    except Exception:
+        return {
+            "ROE": np.nan,
+            "순차입금비율": np.nan,
+            "부채비율": np.nan,
+            "자기자본비율": np.nan,
+            "순현금지표 소스": "없음",
+        }
+
+    net_debt_ratio = extract_latest_metric(ratio_table, ["순차입금비율"])
+    debt_ratio = extract_latest_metric(ratio_table, ["부채비율"])
+    equity_ratio = extract_latest_metric(ratio_table, ["자기자본비율"])
+    roe = extract_latest_metric(ratio_table, ["ROE"])
+
+    if pd.notna(net_debt_ratio):
+        source = "순차입금비율"
+    elif pd.notna(debt_ratio):
+        source = "부채비율"
+    elif pd.notna(equity_ratio):
+        source = "자기자본비율"
+    else:
+        source = "없음"
+
+    return {
+        "ROE": roe,
+        "순차입금비율": net_debt_ratio,
+        "부채비율": debt_ratio,
+        "자기자본비율": equity_ratio,
+        "순현금지표 소스": source,
+    }
+
+
 def calc_per(market_cap: float, profit: float) -> float:
     if pd.isna(market_cap) or pd.isna(profit) or profit <= 0 or market_cap <= 0:
         return np.nan
@@ -281,29 +565,45 @@ def build_result_df(final_df: pd.DataFrame) -> pd.DataFrame:
 
     for gicode in final_df["종목코드"].unique():
         stock_df = final_df[final_df["종목코드"] == gicode].sort_values("연도")
-        recent_4y = stock_df.tail(4)
+        this_year = int(stock_df["기준연도"].dropna().iloc[0]) if "기준연도" in stock_df.columns else datetime.now().year
+        confirmed_row = stock_df[stock_df["연도"] == this_year - 1]
 
-        if len(recent_4y) < 4:
+        if confirmed_row.empty:
             continue
 
         stock_name = stock_df["종목명"].iloc[0]
-        future_row = recent_4y.iloc[-1]
+        confirmed = confirmed_row.iloc[0]
+        operating_forecast = stock_df["적용 영업이익(E)"].dropna().iloc[0] if "적용 영업이익(E)" in stock_df.columns else np.nan
+        net_forecast = stock_df["적용 당기순이익(E)"].dropna().iloc[0] if "적용 당기순이익(E)" in stock_df.columns else np.nan
+        operating_target_year = int(stock_df["적용 영업이익 기준연도"].dropna().iloc[0]) if "적용 영업이익 기준연도" in stock_df.columns else this_year + 2
+        net_target_year = int(stock_df["적용 당기순이익 기준연도"].dropna().iloc[0]) if "적용 당기순이익 기준연도" in stock_df.columns else this_year + 2
+        operating_growth_years = max(1, operating_target_year - (this_year - 1))
+        net_growth_years = max(1, net_target_year - (this_year - 1))
         market_cap = get_market_cap(gicode)
+        current_price = get_current_price(gicode)
+        quality_metrics = get_quality_metrics(gicode)
 
         result_rows.append(
             {
                 "종목코드": gicode,
                 "종목명": stock_name,
-                "작년 영업이익": recent_4y["영업이익"].iloc[0],
-                "작년 당기순이익": recent_4y["당기순이익"].iloc[0],
-                "내후년 영업이익(E)": future_row["영업이익"],
-                "내후년 당기순이익(E)": future_row["당기순이익"],
-                "매출액_3Y성장률": calc_3y_avg_growth(recent_4y["매출액"]),
-                "영업이익_3Y성장률": calc_3y_avg_growth(recent_4y["영업이익"]),
-                "순이익_3Y성장률": calc_3y_avg_growth(recent_4y["당기순이익"]),
+                "현재가": current_price,
+                "작년 영업이익": confirmed["영업이익"],
+                "작년 당기순이익": confirmed["당기순이익"],
+                "내후년 영업이익(E)": operating_forecast,
+                "내후년 당기순이익(E)": net_forecast,
+                "영업이익 성장 기준연수": operating_growth_years,
+                "순이익 성장 기준연수": net_growth_years,
+                "영업이익_3Y성장률": calc_avg_growth(confirmed["영업이익"], operating_forecast, operating_growth_years),
+                "순이익_3Y성장률": calc_avg_growth(confirmed["당기순이익"], net_forecast, net_growth_years),
                 "시가총액": market_cap,
-                "영업이익_PER": calc_per(market_cap, future_row["영업이익"]),
-                "순이익_PER": calc_per(market_cap, future_row["당기순이익"]),
+                "영업이익_PER": calc_per(market_cap, operating_forecast),
+                "순이익_PER": calc_per(market_cap, net_forecast),
+                "ROE": quality_metrics["ROE"],
+                "순차입금비율": quality_metrics["순차입금비율"],
+                "부채비율": quality_metrics["부채비율"],
+                "자기자본비율": quality_metrics["자기자본비율"],
+                "순현금지표 소스": quality_metrics["순현금지표 소스"],
             }
         )
         print(f"scored: {stock_name}")
@@ -320,26 +620,42 @@ def build_ranked_df(result_df: pd.DataFrame, profile: str = "균형형") -> pd.D
     df["P_순이익성장"] = df["순이익_3Y성장률"].rank(pct=True)
     df["P_영업PER"] = 1 - df["영업이익_PER"].rank(pct=True)
     df["P_순이익PER"] = 1 - df["순이익_PER"].rank(pct=True)
+    df["P_ROE"] = df["ROE"].rank(pct=True)
+    df["P_순차입금비율"] = 1 - df["순차입금비율"].rank(pct=True)
+    df["P_부채비율"] = 1 - df["부채비율"].rank(pct=True)
+    df["P_자기자본비율"] = df["자기자본비율"].rank(pct=True)
 
-    df["기여_영업성장"] = weights["영업성장"] * df["P_영업성장"]
-    df["기여_순이익성장"] = weights["순이익성장"] * df["P_순이익성장"]
-    df["기여_영업PER"] = weights["영업PER"] * df["P_영업PER"]
-    df["기여_순이익PER"] = weights["순이익PER"] * df["P_순이익PER"]
-    df["종합점수"] = (
-        df["기여_영업성장"] + df["기여_순이익성장"] + df["기여_영업PER"] + df["기여_순이익PER"]
-    )
-    df["종합점수_100"] = df["종합점수"] * 100
-    df = df.sort_values("종합점수_100", ascending=False).reset_index(drop=True)
-    df["랭킹"] = range(1, len(df) + 1)
     df["성장점수"] = (df["P_영업성장"] + df["P_순이익성장"]) / 2
     df["저평가점수"] = (df["P_영업PER"] + df["P_순이익PER"]) / 2
 
+    df["순현금점수"] = np.where(
+        df["순차입금비율"].notna(),
+        df["P_순차입금비율"],
+        np.where(
+            df["부채비율"].notna(),
+            df["P_부채비율"],
+            np.where(df["자기자본비율"].notna(), df["P_자기자본비율"], 0.5),
+        ),
+    )
+    df["ROE점수"] = df["P_ROE"].fillna(0.5)
+
+    df["기여_성장"] = weights["성장"] * df["성장점수"]
+    df["기여_가치"] = weights["가치"] * df["저평가점수"]
+    df["기여_ROE"] = weights["ROE"] * df["ROE점수"]
+    df["기여_순현금"] = weights["순현금"] * df["순현금점수"]
+    df["종합점수"] = df["기여_성장"] + df["기여_가치"] + df["기여_ROE"] + df["기여_순현금"]
+    df["종합점수_100"] = df["종합점수"] * 100
+    df = df.sort_values("종합점수_100", ascending=False).reset_index(drop=True)
+    df["랭킹"] = range(1, len(df) + 1)
+
     def classify(row: pd.Series) -> str:
-        if row["성장점수"] > 0.6 and row["저평가점수"] > 0.6:
+        if row["성장점수"] >= 0.6 and row["저평가점수"] >= 0.6:
             return "고성장 저평가"
-        if row["성장점수"] > row["저평가점수"]:
+        if row["성장점수"] >= 0.6:
             return "성장형"
-        return "가치형"
+        if row["저평가점수"] >= 0.6:
+            return "가치형"
+        return "균형 관찰형"
 
     df["투자스타일"] = df.apply(classify, axis=1)
     df["투자성향"] = profile
@@ -393,10 +709,10 @@ def build_rebalancing_df(
 def run_portfolio_pipeline(
     gicodes: list[str] | None = None,
     profile: str = "균형형",
-    invest_amount: int = 10_000_000,
+    invest_amount: int = 20_000_000,
     top_n: int = 10,
 ) -> dict[str, object]:
-    final_df, incomplete_list = run_batch_check(gicodes=gicodes)
+    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=gicodes)
     result_df = build_result_df(final_df)
     ranked_df = build_ranked_df(result_df, profile=profile)
     portfolio_df = build_portfolio_df(ranked_df, top_n=top_n, invest_amount=invest_amount)
@@ -406,6 +722,7 @@ def run_portfolio_pipeline(
         "ranked_df": ranked_df,
         "portfolio_df": portfolio_df,
         "incomplete_list": incomplete_list,
+        "incomplete_reasons": incomplete_reasons,
     }
 
 
@@ -498,6 +815,7 @@ def build_bar_figure(result_df: pd.DataFrame) -> go.Figure:
 def build_bubble_figure(df: pd.DataFrame) -> go.Figure:
     plot_df = df.copy()
     plot_df["버블색상점수"] = ((plot_df["저평가점수"] + plot_df["성장점수"]) / 2).round(4)
+    bubble_sizes = (plot_df["종합점수_100"].fillna(0) / 2).replace([np.inf, -np.inf], 0)
     figure = go.Figure(
         data=[
             go.Scatter(
@@ -508,7 +826,7 @@ def build_bubble_figure(df: pd.DataFrame) -> go.Figure:
                 mode="markers+text",
                 textposition="top center",
                 marker=dict(
-                    size=(plot_df["종합점수_100"] / 2).tolist(),
+                    size=bubble_sizes.tolist(),
                     color=plot_df["버블색상점수"].tolist(),
                     colorscale=[
                         [0.0, "#93c5fd"],
@@ -549,8 +867,10 @@ def build_bubble_figure(df: pd.DataFrame) -> go.Figure:
 
 def build_heatmap_figure(df: pd.DataFrame) -> go.Figure:
     top10 = df.sort_values("종합점수", ascending=False).head(10)
-    heatmap_df = top10[["종목명", "P_영업성장", "P_순이익성장", "P_영업PER", "P_순이익PER"]].set_index(
-        "종목명"
+    heatmap_df = (
+        top10[["종목명", "성장점수", "저평가점수", "ROE점수", "순현금점수"]]
+        .rename(columns={"성장점수": "성장", "저평가점수": "가치(PER)", "ROE점수": "ROE", "순현금점수": "순현금"})
+        .set_index("종목명")
     )
     z = heatmap_df.values.astype(float)
     text = np.round(z, 2).astype(str)
@@ -583,11 +903,13 @@ def build_heatmap_figure(df: pd.DataFrame) -> go.Figure:
 
 def build_portfolio_df(df: pd.DataFrame, top_n: int, invest_amount: int) -> pd.DataFrame:
     portfolio_df = df.sort_values("종합점수", ascending=False).head(top_n).copy()
-    total_score = portfolio_df["종합점수"].sum()
-    portfolio_df["비중"] = portfolio_df["종합점수"] / total_score
+    total_score = (portfolio_df["종합점수"] ** 2).sum()
+    portfolio_df["비중"] = (portfolio_df["종합점수"] ** 2) / total_score
     portfolio_df["투자금액"] = (portfolio_df["비중"] * invest_amount).round(0)
     portfolio_df["비중(%)"] = (portfolio_df["비중"] * 100).round(2)
-    return portfolio_df[["종목명", "종합점수", "비중(%)", "투자금액", "투자스타일"]]
+    return portfolio_df[
+        ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE", "순현금점수"]
+    ]
 
 
 def write_dashboard(
@@ -606,16 +928,24 @@ def write_dashboard(
             "랭킹",
             "종목명",
             "종합점수_100",
+            "성장점수",
+            "저평가점수",
+            "ROE점수",
+            "순현금점수",
             "작년 영업이익",
             "작년 당기순이익",
             "내후년 영업이익(E)",
             "내후년 당기순이익(E)",
-            "매출액_3Y성장률",
             "영업이익_3Y성장률",
             "순이익_3Y성장률",
             "시가총액",
             "영업이익_PER",
             "순이익_PER",
+            "ROE",
+            "순차입금비율",
+            "부채비율",
+            "자기자본비율",
+            "순현금지표 소스",
             "투자스타일",
         ]
     ].to_html(index=False, classes="styled-table", border=0)
@@ -732,6 +1062,7 @@ def write_web_snapshot(
     ranked_df: pd.DataFrame,
     portfolio_df: pd.DataFrame,
     incomplete_list: list[str],
+    incomplete_reasons: dict[str, str],
     invest_amount: int,
     profile: str,
     selected_count: int,
@@ -742,6 +1073,31 @@ def write_web_snapshot(
     WEB_PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
     public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
     top10 = ranked_df.head(10).copy()
+    selection_presets = get_selection_presets()
+    stock_universe = build_stock_universe(selection_presets, ranked_df)
+    market_code_name_map = get_market_code_name_map()
+    code_name_map = {
+        row["종목코드"]: row["종목명"]
+        for row in stock_universe[["종목코드", "종목명"]].drop_duplicates("종목코드").to_dict(orient="records")
+    }
+    normalized_excluded = [
+        market_code_name_map.get(item, code_name_map.get(item, item))
+        if isinstance(item, str) and item.startswith("A")
+        else item
+        for item in incomplete_list
+    ]
+    excluded_details = [
+        {
+            "종목명": normalized_name,
+            "사유": incomplete_reasons.get(raw_name, "데이터 확인 필요"),
+        }
+        for raw_name, normalized_name in zip(incomplete_list, normalized_excluded)
+    ]
+
+    def sanitize_records(df: pd.DataFrame, columns: list[str]) -> list[dict[str, object]]:
+        cleaned = df[columns].replace([np.inf, -np.inf], np.nan).astype(object)
+        cleaned = cleaned.where(pd.notna(cleaned), None)
+        return cleaned.to_dict(orient="records")
 
     payload = {
         "generatedAt": datetime.now().isoformat(),
@@ -749,27 +1105,34 @@ def write_web_snapshot(
         "investAmount": invest_amount,
         "selectedStockCount": selected_count,
         "selectedGicodes": selected_gicodes,
-        "excludedStocks": incomplete_list,
-        "selectionPresets": {
-            "현재 기본 포트폴리오": get_top30_gicodes(),
-        },
+        "excludedStocks": normalized_excluded,
+        "excludedDetails": excluded_details,
+        "selectionPresets": selection_presets,
         "summary": {
             "rankedCount": int(len(ranked_df)),
             "excludedCount": int(len(incomplete_list)),
             "topScore": float(top10["종합점수_100"].max()) if not top10.empty else 0,
         },
-        "topPortfolio": portfolio_df.to_dict(orient="records"),
-        "topRankings": top10[
-            ["랭킹", "종목명", "종합점수_100", "성장점수", "저평가점수", "투자스타일"]
-        ].to_dict(orient="records"),
-        "allRankings": ranked_df[
+        "topPortfolio": sanitize_records(
+            portfolio_df,
+            ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE", "순현금점수"],
+        ),
+        "topRankings": sanitize_records(
+            top10,
+            ["종목코드", "랭킹", "종목명", "현재가", "종합점수_100", "성장점수", "저평가점수", "ROE점수", "순현금점수", "투자스타일"],
+        ),
+        "allRankings": sanitize_records(
+            ranked_df,
             [
                 "종목코드",
                 "랭킹",
                 "종목명",
+                "현재가",
                 "종합점수_100",
                 "성장점수",
                 "저평가점수",
+                "ROE점수",
+                "순현금점수",
                 "투자스타일",
                 "작년 영업이익",
                 "작년 당기순이익",
@@ -777,12 +1140,20 @@ def write_web_snapshot(
                 "내후년 당기순이익(E)",
                 "영업이익_PER",
                 "순이익_PER",
-            ]
-        ].to_dict(orient="records"),
-        "stockUniverse": ranked_df[["종목코드", "종목명"]].to_dict(orient="records"),
+                "ROE",
+                "순차입금비율",
+                "부채비율",
+                "자기자본비율",
+                "순현금지표 소스",
+            ],
+        ),
+        "stockUniverse": sanitize_records(
+            stock_universe,
+            ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액", "현재가"],
+        ),
     }
 
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
     snapshot_path.write_text(serialized, encoding="utf-8")
     public_snapshot_path.write_text(serialized, encoding="utf-8")
     return snapshot_path
@@ -790,10 +1161,10 @@ def write_web_snapshot(
 
 def main() -> None:
     top_n = 10
-    invest_amount = 10_000_000
+    invest_amount = 20_000_000
     profile = "균형형"
 
-    final_df, incomplete_list = run_batch_check()
+    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
     print(f"incomplete stocks: {incomplete_list}")
 
     result_df = build_result_df(final_df)
@@ -809,6 +1180,7 @@ def main() -> None:
         ranked_df=ranked_df,
         portfolio_df=portfolio_df,
         incomplete_list=incomplete_list,
+        incomplete_reasons=incomplete_reasons,
         invest_amount=invest_amount,
         profile=profile,
         selected_count=len(get_top30_gicodes()),
