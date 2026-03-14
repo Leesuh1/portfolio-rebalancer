@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "outputs"
+WEB_PUBLIC_DATA_DIR = BASE_DIR / "web" / "public" / "data"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 20
 DEFAULT_TICKERS = [
@@ -726,15 +728,69 @@ def save_csv_outputs(final_df: pd.DataFrame, result_df: pd.DataFrame, ranked_df:
     ranked_df.to_csv(OUTPUT_DIR / "ranked_portfolio.csv", index=False, encoding="utf-8-sig")
 
 
+def write_web_snapshot(
+    ranked_df: pd.DataFrame,
+    portfolio_df: pd.DataFrame,
+    incomplete_list: list[str],
+    invest_amount: int,
+    profile: str,
+    selected_count: int,
+) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    snapshot_path = OUTPUT_DIR / "dashboard_data.json"
+    WEB_PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    top10 = ranked_df.head(10).copy()
+
+    payload = {
+        "generatedAt": datetime.now().isoformat(),
+        "profile": profile,
+        "investAmount": invest_amount,
+        "selectedStockCount": selected_count,
+        "excludedStocks": incomplete_list,
+        "summary": {
+            "rankedCount": int(len(ranked_df)),
+            "excludedCount": int(len(incomplete_list)),
+            "topScore": float(top10["종합점수_100"].max()) if not top10.empty else 0,
+        },
+        "topPortfolio": portfolio_df.to_dict(orient="records"),
+        "topRankings": top10[
+            ["랭킹", "종목명", "종합점수_100", "성장점수", "저평가점수", "투자스타일"]
+        ].to_dict(orient="records"),
+        "allRankings": ranked_df[
+            [
+                "랭킹",
+                "종목명",
+                "종합점수_100",
+                "성장점수",
+                "저평가점수",
+                "투자스타일",
+                "작년 영업이익",
+                "작년 당기순이익",
+                "내후년 영업이익(E)",
+                "내후년 당기순이익(E)",
+                "영업이익_PER",
+                "순이익_PER",
+            ]
+        ].to_dict(orient="records"),
+    }
+
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    snapshot_path.write_text(serialized, encoding="utf-8")
+    public_snapshot_path.write_text(serialized, encoding="utf-8")
+    return snapshot_path
+
+
 def main() -> None:
     top_n = 10
     invest_amount = 10_000_000
+    profile = "균형형"
 
     final_df, incomplete_list = run_batch_check()
     print(f"incomplete stocks: {incomplete_list}")
 
     result_df = build_result_df(final_df)
-    ranked_df = build_ranked_df(result_df, profile="균형형")
+    ranked_df = build_ranked_df(result_df, profile=profile)
     portfolio_df = build_portfolio_df(ranked_df, top_n=top_n, invest_amount=invest_amount)
 
     bar_fig = build_bar_figure(result_df)
@@ -742,6 +798,14 @@ def main() -> None:
     heatmap_fig = build_heatmap_figure(ranked_df)
 
     save_csv_outputs(final_df, result_df, ranked_df)
+    write_web_snapshot(
+        ranked_df=ranked_df,
+        portfolio_df=portfolio_df,
+        incomplete_list=incomplete_list,
+        invest_amount=invest_amount,
+        profile=profile,
+        selected_count=len(get_top30_gicodes()),
+    )
     dashboard_path = write_dashboard(ranked_df, portfolio_df, bar_fig, bubble_fig, heatmap_fig)
 
     print(f"dashboard written to: {dashboard_path}")

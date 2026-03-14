@@ -31,11 +31,24 @@ jobs:
       - name: Rebuild dashboard outputs
         run: python portfolio_dashboard.py
 
+      - name: Commit refreshed data snapshot
+        run: |
+          if git diff --quiet -- web/public/data/; then
+            echo "No data changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/public/data/
+          git commit -m "Refresh portfolio data snapshot"
+          git push
+
       - name: Prepare GitHub Pages files
         run: |
           mkdir -p site
           cp outputs/quant_dashboard.html site/index.html
           cp outputs/*.csv site/
+          cp outputs/dashboard_data.json site/
 
       - name: Upload outputs
         uses: actions/upload-artifact@v4
