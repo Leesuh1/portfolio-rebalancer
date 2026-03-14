@@ -118,11 +118,16 @@ function arraysEqualAsSet(left: string[], right: string[]) {
   return right.every((item) => leftSet.has(item));
 }
 
-function buildInitialHoldings(data: DashboardData): HoldingRow[] {
-  const baseCodes = new Set(data.selectedGicodes ?? []);
+function calculateCombinedScore(
+  row: DashboardData["allRankings"][number],
+  weights: { growth: number; value: number; roe: number }
+) {
+  const roeScore = Number(row["ROE점수"] ?? 0);
+  return row["성장점수"] * weights.growth + row["저평가점수"] * weights.value + roeScore * weights.roe;
+}
 
-  return data.allRankings
-    .filter((item) => baseCodes.has(item["종목코드"]))
+function buildHoldingRowsFromRankings(rows: DashboardData["allRankings"]): HoldingRow[] {
+  return rows
     .slice(0, 10)
     .map((item) => {
       const price = Number(item["현재가"] ?? 0);
@@ -134,16 +139,42 @@ function buildInitialHoldings(data: DashboardData): HoldingRow[] {
     });
 }
 
-function buildHoldingRowsFromCodes(data: DashboardData, codes: string[]): HoldingRow[] {
+function buildHoldingRowsFromCodes(
+  data: DashboardData,
+  codes: string[],
+  weights: { growth: number; value: number; roe: number }
+) {
   const codeSet = new Set(codes);
-  return data.allRankings
+  const rankedRows = data.allRankings
     .filter((item) => codeSet.has(item["종목코드"]))
-    .slice(0, 10)
     .map((item) => ({
-      code: item["종목코드"],
-      shares: 1,
-      avgBuyPrice: Number(item["현재가"] ?? 0),
-    }));
+      ...item,
+      __combinedScore: calculateCombinedScore(item, weights),
+    }))
+    .sort((a, b) => b.__combinedScore - a.__combinedScore);
+
+  return buildHoldingRowsFromRankings(rankedRows);
+}
+
+function buildInitialHoldings(
+  data: DashboardData,
+  codes: string[],
+  weights: { growth: number; value: number; roe: number }
+): HoldingRow[] {
+  return buildHoldingRowsFromCodes(data, codes, weights);
+}
+
+function getStyleLabel(growthScore: number, valueScore: number) {
+  if (growthScore >= 0.6 && valueScore >= 0.6) {
+    return "고성장 저평가";
+  }
+  if (growthScore >= 0.6) {
+    return "성장형";
+  }
+  if (valueScore >= 0.6) {
+    return "가치형";
+  }
+  return "균형 관찰형";
 }
 
 function getActionDescription(action: RebalanceRow["action"]) {
@@ -187,13 +218,15 @@ export function DashboardApp({ data }: Props) {
   const [totalAsset, setTotalAsset] = useState<number>(data.investAmount || 20_000_000);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedOnly, setSelectedOnly] = useState(false);
-  const [holdings, setHoldings] = useState<HoldingRow[]>(() => buildInitialHoldings(data));
   const [holdingSearchTerm, setHoldingSearchTerm] = useState("");
   const portfolioPieRef = useRef<HTMLElement | null>(null);
   const factorMapRef = useRef<HTMLElement | null>(null);
   const [portfolioListHeight, setPortfolioListHeight] = useState<number | null>(null);
   const [factorPanelHeight, setFactorPanelHeight] = useState<number | null>(null);
   const activeWeights = profileWeights[profile as keyof typeof profileWeights] ?? profileWeights.균형형;
+  const [holdings, setHoldings] = useState<HoldingRow[]>(() =>
+    buildInitialHoldings(data, defaultSelection, activeWeights)
+  );
 
   const stockMap = useMemo(
     () => new Map(stockUniverse.map((item) => [item["종목코드"], item])),
@@ -238,19 +271,10 @@ export function DashboardApp({ data }: Props) {
           item["저평가점수"] * activeWeights.value +
           roeScore * activeWeights.roe;
 
-        let style = "균형 관찰형";
-        if (item["성장점수"] >= 0.6 && item["저평가점수"] >= 0.6) {
-          style = "고성장 저평가";
-        } else if (item["성장점수"] >= 0.6) {
-          style = "성장형";
-        } else if (item["저평가점수"] >= 0.6) {
-          style = "가치형";
-        }
-
         return {
           ...item,
           "종합점수_100": Number((combinedScore * 100).toFixed(2)),
-          "투자스타일": style
+          "투자스타일": getStyleLabel(item["성장점수"], item["저평가점수"])
         };
       })
       .sort((a, b) => b["종합점수_100"] - a["종합점수_100"])
@@ -692,7 +716,7 @@ export function DashboardApp({ data }: Props) {
     const safePreset = selectionPresets[presetName];
     if (safePreset) {
       setSelectedCodes(safePreset);
-      setHoldings(buildHoldingRowsFromCodes(data, safePreset));
+      setHoldings(buildHoldingRowsFromCodes(data, safePreset, activeWeights));
       setSearchTerm("");
       setSelectedOnly(false);
     }

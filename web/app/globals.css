@@ -910,7 +910,7 @@ select {
 }
 
 .paired-card {
-  min-height: 188px;
+  min-height: 228px;
 }
 
 .paired-scroll {
@@ -1032,6 +1032,7 @@ select {
   border: 1px solid var(--line);
   background: white;
   padding: 16px;
+  overflow: hidden;
 }
 
 .rebalance-card.strong-card {
