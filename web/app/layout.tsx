@@ -2,8 +2,8 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Portfolio Rebalancer",
-  description: "한국 주식 포트폴리오 리밸런싱 초안"
+  title: "모두의 ETF",
+  description: "자산 배분과 포트폴리오 관리를 위한 투자 도구"
 };
 
 export default function RootLayout({
