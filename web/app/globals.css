@@ -1245,8 +1245,7 @@ select {
 
 .donut-ring {
   width: 188px;
-  height: auto;
-  aspect-ratio: 1 / 1;
+  height: 188px;
   border-radius: 50%;
   padding: 22px;
   display: grid;
@@ -1256,7 +1255,7 @@ select {
 
 .donut-ring.large {
   width: 248px;
-  height: auto;
+  height: 248px;
   padding: 28px;
 }
 
