@@ -336,25 +336,36 @@ export async function getDashboardData(): Promise<DashboardData> {
 
   try {
     const raw = await fs.readFile(filePath, "utf-8");
-    const parsed = JSON.parse(raw) as Omit<DashboardData, "exchangeRate">;
+    const parsed = JSON.parse(raw) as Partial<DashboardData>;
+    const snapshotExchangeRate = parsed.exchangeRate ?? fallbackData.exchangeRate;
+    const snapshotExtraAssets = parsed.extraAssetUniverse ?? [];
     const exchangeRate = await getUsdKrwExchangeRate();
+    const effectiveExchangeRate = exchangeRate.fallback ? snapshotExchangeRate : exchangeRate;
     const [usdCashAsset, goldAsset, bitcoinAsset, ethereumAsset, usStockUniverse] = await Promise.all([
-      getUsdCashAsset(exchangeRate.value, exchangeRate.asOf),
-      getGoldEtfAsset(exchangeRate.value),
+      getUsdCashAsset(effectiveExchangeRate.value, effectiveExchangeRate.asOf),
+      getGoldEtfAsset(effectiveExchangeRate.value),
       getNaverBitcoinPrice(),
       getNaverEthereumPrice(),
-      getUsStockUniverse(exchangeRate.value)
+      getUsStockUniverse(effectiveExchangeRate.value)
     ]);
+
+    const liveAssets = [
+      usdCashAsset,
+      ...(goldAsset ? [goldAsset] : []),
+      ...(bitcoinAsset ? [bitcoinAsset] : []),
+      ...(ethereumAsset ? [ethereumAsset] : []),
+      ...usStockUniverse
+    ];
+    const mergedExtraAssetUniverse = new Map(snapshotExtraAssets.map((item) => [item.code, item]));
+    liveAssets.forEach((item) => {
+      mergedExtraAssetUniverse.set(item.code, item);
+    });
+
     return {
+      ...fallbackData,
       ...parsed,
-      exchangeRate,
-      extraAssetUniverse: [
-        usdCashAsset,
-        ...(goldAsset ? [goldAsset] : []),
-        ...(bitcoinAsset ? [bitcoinAsset] : []),
-        ...(ethereumAsset ? [ethereumAsset] : []),
-        ...usStockUniverse
-      ]
+      exchangeRate: effectiveExchangeRate,
+      extraAssetUniverse: [...mergedExtraAssetUniverse.values()]
     };
   } catch {
     return fallbackData;

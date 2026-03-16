@@ -5,6 +5,7 @@ from email.utils import parsedate_to_datetime
 from io import StringIO
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -106,6 +107,173 @@ PROFILE_WEIGHTS = {
         "순현금": 0.15,
     },
 }
+
+US_TOP_ASSETS = [
+    {"code": "ALT:US:MSFT", "ticker": "msft.us", "name": "Microsoft"},
+    {"code": "ALT:US:AAPL", "ticker": "aapl.us", "name": "Apple"},
+    {"code": "ALT:US:NVDA", "ticker": "nvda.us", "name": "NVIDIA"},
+    {"code": "ALT:US:AMZN", "ticker": "amzn.us", "name": "Amazon"},
+    {"code": "ALT:US:GOOGL", "ticker": "googl.us", "name": "Alphabet"},
+    {"code": "ALT:US:META", "ticker": "meta.us", "name": "Meta"},
+    {"code": "ALT:US:BRKB", "ticker": "brk-b.us", "name": "Berkshire Hathaway B"},
+    {"code": "ALT:US:AVGO", "ticker": "avgo.us", "name": "Broadcom"},
+    {"code": "ALT:US:TSLA", "ticker": "tsla.us", "name": "Tesla"},
+    {"code": "ALT:US:JPM", "ticker": "jpm.us", "name": "JPMorgan Chase"},
+]
+
+
+def build_external_date_label(raw_label: str | None) -> str | None:
+    if not raw_label:
+        return None
+
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", raw_label)
+    if iso_match:
+        return iso_match.group(1)
+
+    month_day_match = re.search(r"(\d{2})\.(\d{2})\.", raw_label)
+    if month_day_match:
+        now = datetime.now()
+        return f"{now.year}-{month_day_match.group(1)}-{month_day_match.group(2)}"
+
+    return raw_label.strip()
+
+
+def fetch_text(url: str) -> str | None:
+    try:
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.text
+    except Exception:
+        return None
+
+
+def fetch_stooq_price(ticker: str) -> tuple[float, str | None] | None:
+    csv = fetch_text(f"https://stooq.com/q/l/?s={ticker}&i=d")
+    if not csv:
+        return None
+
+    parts = csv.strip().split(",")
+    if len(parts) < 7:
+        return None
+
+    _, date, _time, _open, _high, _low, close = parts[:7]
+    price = float(close) if close not in {"", "N/D"} else None
+    if price is None:
+        return None
+
+    return price, build_external_date_label(date)
+
+
+def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, object]]]:
+    exchange_rate = {
+        "value": 1400,
+        "asOf": None,
+        "source": "네이버 증권 fallback",
+        "fallback": True,
+    }
+
+    exchange_html = fetch_text("https://m.stock.naver.com/marketindex/exchange/FX_USDKRW")
+    if exchange_html:
+        price_match = re.search(r'"closePrice":"([\d,]+\.\d+)"', exchange_html)
+        date_match = re.search(r'"localTradedAt":"([^"]+)"', exchange_html)
+        if price_match:
+            exchange_rate = {
+                "value": float(price_match.group(1).replace(",", "")),
+                "asOf": build_external_date_label(date_match.group(1) if date_match else None),
+                "source": "네이버 증권",
+                "fallback": False,
+            }
+
+    exchange_value = float(exchange_rate["value"])
+    assets: list[dict[str, object]] = [
+        {
+            "code": "ALT:USD",
+            "name": "달러",
+            "market": "달러",
+            "category": "usd_cash",
+            "currentPrice": exchange_value,
+            "nativePrice": 1,
+            "nativeCurrency": "USD",
+            "tradedAt": exchange_rate["asOf"],
+            "quantityStep": 0.01,
+            "quantityPrecision": 2,
+            "unitLabel": "USD",
+            "priceInputMode": "krw",
+        }
+    ]
+
+    gld_result = fetch_stooq_price("gld.us")
+    if gld_result:
+        native_price, traded_at = gld_result
+        assets.append(
+            {
+                "code": "ALT:GLD",
+                "name": "금 (GLD)",
+                "market": "금",
+                "category": "gold",
+                "currentPrice": native_price * exchange_value,
+                "nativePrice": native_price,
+                "nativeCurrency": "USD",
+                "tradedAt": traded_at,
+                "quantityStep": 1,
+                "quantityPrecision": 0,
+                "unitLabel": "주",
+                "priceInputMode": "usd",
+            }
+        )
+
+    for code, name, url, unit in [
+        ("ALT:BTC", "비트코인", "https://m.stock.naver.com/crypto/UPBIT/BTC", "BTC"),
+        ("ALT:ETH", "이더리움", "https://m.stock.naver.com/crypto/UPBIT/ETH", "ETH"),
+    ]:
+        html = fetch_text(url)
+        if not html:
+            continue
+        price_match = re.search(r'"tradePrice":([\d.]+)', html)
+        traded_at_match = re.search(r'"koreaTradedAt":"([^"]+)"', html)
+        if not price_match:
+            continue
+        price = float(price_match.group(1))
+        assets.append(
+            {
+                "code": code,
+                "name": name,
+                "market": "가상자산",
+                "category": "crypto",
+                "currentPrice": price,
+                "nativePrice": price,
+                "nativeCurrency": "KRW",
+                "tradedAt": build_external_date_label(traded_at_match.group(1) if traded_at_match else None),
+                "quantityStep": 0.000001,
+                "quantityPrecision": 6,
+                "unitLabel": unit,
+                "priceInputMode": "krw",
+            }
+        )
+
+    for item in US_TOP_ASSETS:
+        result = fetch_stooq_price(item["ticker"])
+        if not result:
+            continue
+        native_price, traded_at = result
+        assets.append(
+            {
+                "code": item["code"],
+                "name": item["name"],
+                "market": "미국주식",
+                "category": "us_stock",
+                "currentPrice": native_price * exchange_value,
+                "nativePrice": native_price,
+                "nativeCurrency": "USD",
+                "tradedAt": traded_at,
+                "quantityStep": 1,
+                "quantityPrecision": 0,
+                "unitLabel": "주",
+                "priceInputMode": "usd",
+            }
+        )
+
+    return exchange_rate, assets
 
 
 def load_fnguide_html(gicode: str) -> BeautifulSoup:
@@ -1099,8 +1267,12 @@ def write_web_snapshot(
         cleaned = cleaned.where(pd.notna(cleaned), None)
         return cleaned.to_dict(orient="records")
 
+    exchange_rate, extra_asset_universe = get_external_asset_snapshot()
+
     payload = {
         "generatedAt": datetime.now().isoformat(),
+        "exchangeRate": exchange_rate,
+        "extraAssetUniverse": extra_asset_universe,
         "profile": profile,
         "investAmount": invest_amount,
         "selectedStockCount": selected_count,
