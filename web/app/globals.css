@@ -491,7 +491,7 @@ select {
 
 .personal-allocation-diff-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(180px, 1fr);
   gap: 14px;
   align-items: center;
 }
@@ -501,9 +501,13 @@ select {
   color: var(--muted);
 }
 
+.personal-allocation-diff-copy {
+  text-align: right;
+}
+
 .personal-allocation-detail-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(180px, 1fr);
   gap: 14px;
   align-items: center;
 }
@@ -1211,6 +1215,35 @@ select {
   flex-direction: column;
   min-height: 350px;
   overflow: hidden;
+}
+
+.balance-chart-grid {
+  margin-bottom: 18px;
+}
+
+.balance-chart-card {
+  min-height: 0;
+  gap: 16px;
+}
+
+.balance-chart-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.balance-chart-head strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.balance-chart-head small {
+  color: var(--muted);
+}
+
+.balance-chart-body {
+  min-height: 280px;
 }
 
 .insight-head {

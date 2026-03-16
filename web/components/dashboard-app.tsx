@@ -109,6 +109,7 @@ type RebalanceRow = {
 
 const profileLabels = ["안정형", "밸런스형", "공격형"] as const;
 const assetClassLabels = ["현금/예적금/채권", "금", "가상자산", "주식"] as const;
+const portfolioSegmentPalette: string[] = ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"];
 const presetOrder = [
   "기본 관심 종목",
   "코스피 대표 30개",
@@ -1405,13 +1406,6 @@ export function DashboardApp({ data }: Props) {
         targetPct: overseasStockPct,
         currentPct: total > 0 ? (totals.usStock / total) * 100 : 0,
       },
-      {
-        key: "crypto",
-        label: "가상자산 합계",
-        amount: totals.crypto,
-        targetPct: activeAssetAllocation["가상자산"],
-        currentPct: total > 0 ? (totals.crypto / total) * 100 : 0,
-      },
     ].map((item) => ({
       ...item,
       diffPct: item.currentPct - item.targetPct,
@@ -1469,10 +1463,13 @@ export function DashboardApp({ data }: Props) {
       return sum + aggregate.shares * price;
     }, 0);
     const profit = value - purchaseTotal;
-    const returnPct = purchaseTotal > 0 ? (profit / purchaseTotal) * 100 : 0;
-    const cash = Math.max(0, (baselineProfile?.totalAsset ?? 0) - purchaseTotal);
+    const principal = Number(baselineProfile?.totalAsset ?? 0);
+    const realizedProfitTotal = Number(baselineProfile?.realizedProfit ?? 0);
+    const totalProfit = realizedProfitTotal + profit;
+    const returnPct = principal > 0 ? (totalProfit / principal) * 100 : 0;
+    const cash = Math.max(0, principal - purchaseTotal);
     return { purchaseTotal, value, profit, returnPct, cash };
-  }, [baselineHoldings, getAssetCandidate]);
+  }, [baselineHoldings, baselineProfile?.realizedProfit, baselineProfile?.totalAsset, getAssetCandidate]);
 
   const savedProfileMetrics = useMemo(
     () =>
@@ -1538,8 +1535,9 @@ export function DashboardApp({ data }: Props) {
   }, [rebalanceBudget, visiblePortfolio]);
 
   const holdingSummary = useMemo<RebalanceRow[]>(() => {
+    const domesticHoldings = normalizedHoldings.filter((item) => !item.code.startsWith("ALT:"));
     const currentMap = new Map(
-      normalizedHoldings.map((item) => [
+      domesticHoldings.map((item) => [
         item.code,
         {
           name: item.name,
@@ -1583,7 +1581,7 @@ export function DashboardApp({ data }: Props) {
       });
     });
 
-    normalizedHoldings.forEach((item) => {
+    domesticHoldings.forEach((item) => {
       if (rows.has(item.code)) {
         return;
       }
@@ -1603,7 +1601,6 @@ export function DashboardApp({ data }: Props) {
         action: item.shares > 0 ? "전량 매도" : "유지"
       });
     });
-
     return [...rows.values()].sort((a, b) => Math.abs(b.diffAmount) - Math.abs(a.diffAmount));
   }, [normalizedHoldings, rebalanceBudget, targetShareMap.targetShares, visiblePortfolio]);
 
@@ -1694,65 +1691,120 @@ export function DashboardApp({ data }: Props) {
       realizedProfit: params.realizedProfit ?? realizedProfit,
     });
 
-  const buildPortfolioSegmentsFromSnapshot = (snapshot: SavedProfile | null) => {
-    if (!snapshot) {
-      return [];
-    }
-
-    const holdingsSource = sanitizeHoldings(snapshot.holdings);
-    const purchaseTotal = holdingsSource.reduce((sum, position) => sum + aggregatePosition(position).purchaseTotal, 0);
-    const segments = holdingsSource
+  const buildAssetSegments = useCallback((positions: HoldingPosition[], cashAmount = 0) => {
+    const segments = sanitizeHoldings(positions)
       .map((position, index) => {
         const aggregate = aggregatePosition(position);
         const asset = getAssetCandidate(position.code);
         const price = Number(asset?.price ?? 0);
-        const label = asset?.name ?? position.code;
         return {
-          label,
+          label: asset?.name ?? position.code,
           value: aggregate.shares * price,
-          color: ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"][index % 10],
+          color: portfolioSegmentPalette[index % portfolioSegmentPalette.length],
         };
       })
       .filter((item) => item.value > 0);
 
-    const cash = Math.max(0, snapshot.totalAsset - purchaseTotal);
-    if (cash > 0) {
-      segments.push({ label: "현금", value: cash, color: "#dce8f8" });
+    if (cashAmount > 0) {
+      segments.push({ label: "현금", value: cashAmount, color: "#dce8f8" });
     }
 
     return segments;
-  };
+  }, [getAssetCandidate]);
+
+  const buildSectorSegments = useCallback((positions: HoldingPosition[], cashAmount = 0) => {
+    const totals = {
+      cashBond: Math.max(0, cashAmount),
+      gold: 0,
+      crypto: 0,
+      stock: 0,
+    };
+
+    sanitizeHoldings(positions).forEach((position) => {
+      const aggregate = aggregatePosition(position);
+      const asset = getAssetCandidate(position.code);
+      const amount = aggregate.shares * Number(asset?.price ?? 0);
+      const bucket = getAssetAllocationBucket(position.code);
+
+      if (bucket === "gold") {
+        totals.gold += amount;
+        return;
+      }
+      if (bucket === "crypto") {
+        totals.crypto += amount;
+        return;
+      }
+      if (bucket === "usd_cash") {
+        totals.cashBond += amount;
+        return;
+      }
+      totals.stock += amount;
+    });
+
+    return [
+      { label: "현금/예적금/채권", value: totals.cashBond, color: "#8aa0b8" },
+      { label: "금", value: totals.gold, color: "#f0c36d" },
+      { label: "가상자산", value: totals.crypto, color: "#7fb0ff" },
+      { label: "주식", value: totals.stock, color: "#ff8da1" },
+    ].filter((item) => item.value > 0);
+  }, [getAssetCandidate]);
+
+  const collapseLegendRows = useCallback(
+    <T extends { label: string; color: string; pct: number }>(items: T[]) => {
+      if (items.length <= 10) {
+        return items;
+      }
+
+      const topRows = items.slice(0, 10);
+      const rest = items.slice(10);
+      const otherPct = rest.reduce((sum, item) => sum + item.pct, 0);
+
+      if (otherPct <= 0) {
+        return topRows;
+      }
+
+      return [
+        ...topRows,
+        {
+          ...topRows[topRows.length - 1],
+          label: "기타",
+          color: "#dce8f8",
+          pct: otherPct,
+        },
+      ];
+    },
+    []
+  );
+
+  const buildPortfolioSegmentsFromSnapshot = useCallback((snapshot: SavedProfile | null) => {
+    if (!snapshot) {
+      return [];
+    }
+    const holdingsSource = sanitizeHoldings(snapshot.holdings);
+    const purchaseTotal = holdingsSource.reduce((sum, position) => sum + aggregatePosition(position).purchaseTotal, 0);
+    return buildAssetSegments(holdingsSource, Math.max(0, snapshot.totalAsset - purchaseTotal));
+  }, [buildAssetSegments]);
 
   const portfolioChartSegments = useMemo(
     () =>
       visiblePortfolio.map((item, index) => ({
         label: item.name,
         value: item.weightPct,
-        color: ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"][index]
+        color: portfolioSegmentPalette[index % portfolioSegmentPalette.length]
       })),
     [visiblePortfolio]
   );
 
-  const currentPortfolioChartSegments = useMemo(() => {
-    const segments = normalizedHoldings
-      .filter((item) => item.price > 0 && item.shares > 0)
-      .map((item, index) => ({
-        label: item.name,
-        value: item.shares * item.price,
-        color: ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"][index % 10]
-      }));
-
-    if (nonDomesticReserveAmount > 0) {
-      segments.push({ label: "비주식 자산", value: nonDomesticReserveAmount, color: "#dce8f8" });
-    }
-    return segments;
-  }, [nonDomesticReserveAmount, normalizedHoldings]);
+  const currentPortfolioChartSegments = useMemo(
+    () => buildAssetSegments(displayHoldings, valuationCash),
+    [buildAssetSegments, displayHoldings, valuationCash]
+  );
 
   const targetPortfolioChartSegments = useMemo(() => {
     const segments = visiblePortfolio.map((item, index) => ({
       label: item.name,
       value: item.targetAmount,
-      color: ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"][index % 10]
+      color: portfolioSegmentPalette[index % portfolioSegmentPalette.length]
     }));
 
     if (nonDomesticReserveAmount > 0) {
@@ -1766,53 +1818,45 @@ export function DashboardApp({ data }: Props) {
 
   const currentPortfolioLegend = useMemo(() => {
     const total = currentPortfolioChartSegments.reduce((sum, item) => sum + item.value, 0) || 1;
-    return currentPortfolioChartSegments
+    const rows = currentPortfolioChartSegments
       .map((item) => ({
         ...item,
         pct: (item.value / total) * 100,
       }))
       .sort((a, b) => b.pct - a.pct);
-  }, [currentPortfolioChartSegments]);
+    return collapseLegendRows(rows);
+  }, [collapseLegendRows, currentPortfolioChartSegments]);
 
-  const baselinePortfolioSegments = useMemo(() => {
-    const holdingsSource = baselineProfile?.holdings ?? [];
-    const segments = holdingsSource
-      .map((position, index) => {
-        const aggregate = aggregatePosition(position);
-        const asset = getAssetCandidate(position.code);
-        const price = Number(asset?.price ?? 0);
-        const label = asset?.name ?? position.code;
-        return {
-          label,
-          value: aggregate.shares * price,
-          color: ["#3182f6", "#4f95f8", "#69a6fb", "#84b6fc", "#9dc5fd", "#b4d3fe", "#c7defe", "#d8e8ff", "#e6f1ff", "#f0f7ff"][index % 10],
-        };
-      })
-      .filter((item) => item.value > 0);
-
-    if (baselineProfile) {
-      const baselinePurchase = sanitizeHoldings(baselineProfile.holdings).reduce((sum, position) => {
-        const aggregate = aggregatePosition(position);
-        return sum + aggregate.purchaseTotal;
-      }, 0);
-      const baselineCash = Math.max(0, baselineProfile.totalAsset - baselinePurchase);
-      if (baselineCash > 0) {
-        segments.push({ label: "현금", value: baselineCash, color: "#dce8f8" });
-      }
-    }
-
-    return segments;
-  }, [baselineProfile, getAssetCandidate]);
+  const baselinePortfolioSegments = useMemo(
+    () => buildAssetSegments(baselineProfile?.holdings ?? [], baselineSummary.cash),
+    [baselineProfile?.holdings, baselineSummary.cash, buildAssetSegments]
+  );
 
   const baselinePortfolioLegend = useMemo(() => {
     const total = baselinePortfolioSegments.reduce((sum, item) => sum + item.value, 0) || 1;
-    return baselinePortfolioSegments
+    const rows = baselinePortfolioSegments
       .map((item) => ({
         ...item,
         pct: (item.value / total) * 100,
       }))
       .sort((a, b) => b.pct - a.pct);
-  }, [baselinePortfolioSegments]);
+    return collapseLegendRows(rows);
+  }, [baselinePortfolioSegments, collapseLegendRows]);
+
+  const baselineSectorSegments = useMemo(
+    () => buildSectorSegments(baselineProfile?.holdings ?? [], baselineSummary.cash),
+    [baselineProfile?.holdings, baselineSummary.cash, buildSectorSegments]
+  );
+
+  const baselineSectorLegend = useMemo(() => {
+    const total = baselineSectorSegments.reduce((sum, item) => sum + item.value, 0) || 1;
+    return baselineSectorSegments
+      .map((item) => ({
+        ...item,
+        pct: (item.value / total) * 100,
+      }))
+      .sort((a, b) => b.pct - a.pct);
+  }, [baselineSectorSegments]);
 
   const baselinePerformanceLegend = useMemo(() => {
     const baselineTotal = baselinePortfolioSegments.reduce((sum, item) => sum + item.value, 0) || 1;
@@ -2025,23 +2069,25 @@ export function DashboardApp({ data }: Props) {
 
   const rebalanceBeforeLegend = useMemo(() => {
     const total = rebalanceBeforeSegments.reduce((sum, item) => sum + item.value, 0) || 1;
-    return rebalanceBeforeSegments
+    const rows = rebalanceBeforeSegments
       .map((item) => ({
         ...item,
         pct: (item.value / total) * 100,
       }))
       .sort((a, b) => b.pct - a.pct);
-  }, [rebalanceBeforeSegments]);
+    return collapseLegendRows(rows);
+  }, [collapseLegendRows, rebalanceBeforeSegments]);
 
   const rebalanceAfterLegend = useMemo(() => {
     const total = rebalanceAfterSegments.reduce((sum, item) => sum + item.value, 0) || 1;
-    return rebalanceAfterSegments
+    const rows = rebalanceAfterSegments
       .map((item) => ({
         ...item,
         pct: (item.value / total) * 100,
       }))
       .sort((a, b) => b.pct - a.pct);
-  }, [rebalanceAfterSegments]);
+    return collapseLegendRows(rows);
+  }, [collapseLegendRows, rebalanceAfterSegments]);
 
   const rebalanceBeforeCount = useMemo(
     () =>
@@ -3490,50 +3536,44 @@ export function DashboardApp({ data }: Props) {
                   <div className="personal-allocation-diff-list">
                     {personalAllocationDiffRows.map((item) => (
                       <article className="personal-allocation-diff-row" key={`diff-${item.key}`}>
-                        <div>
-                          <strong>{item.label}</strong>
-                          <small>
-                            현재 {item.currentPct.toFixed(2)}% / 가이드 {item.targetPct.toFixed(2)}%
-                          </small>
-                        </div>
-                        <div className={item.direction === "over" ? "metric-negative" : item.direction === "under" ? "metric-positive" : ""}>
-                          <strong>
-                            {item.diffPct > 0 ? "+" : ""}
-                            {item.diffPct.toFixed(2)}%p
-                          </strong>
-                          <small>
-                            {item.direction === "over"
-                              ? "가이드보다 높음"
-                              : item.direction === "under"
-                                ? "가이드보다 낮음"
-                                : "가이드와 유사"}
-                          </small>
-                        </div>
+                        <strong>{item.label}</strong>
+                        <small>현재 {item.currentPct.toFixed(2)}%</small>
+                        <small>가이드 {item.targetPct.toFixed(2)}%</small>
+                        <small className="personal-allocation-diff-copy">
+                          {item.direction === "over" ? (
+                            <>
+                              가이드보다 <strong className="metric-negative">{item.diffPct.toFixed(2)}%p</strong> 높음
+                            </>
+                          ) : item.direction === "under" ? (
+                            <>
+                              가이드보다 <strong className="metric-positive">{Math.abs(item.diffPct).toFixed(2)}%p</strong> 낮음
+                            </>
+                          ) : (
+                            "가이드와 유사"
+                          )}
+                        </small>
                       </article>
                     ))}
                   </div>
                   <div className="personal-allocation-detail-grid">
                     {personalAllocation.detailRows.map((item) => (
                       <article className="personal-allocation-detail-row" key={`detail-${item.key}`}>
-                        <div>
-                          <strong>{item.label}</strong>
-                          <small>
-                            현재 {item.currentPct.toFixed(2)}% / 가이드 {item.targetPct.toFixed(2)}%
-                          </small>
-                        </div>
-                        <div className={item.diffPct > 0.25 ? "metric-negative" : item.diffPct < -0.25 ? "metric-positive" : ""}>
-                          <strong>
-                            {item.diffPct > 0 ? "+" : ""}
-                            {item.diffPct.toFixed(2)}%p
-                          </strong>
-                          <small>
-                            {item.diffPct > 0.25
-                              ? "가이드보다 높음"
-                              : item.diffPct < -0.25
-                                ? "가이드보다 낮음"
-                                : "가이드와 유사"}
-                          </small>
-                        </div>
+                        <strong>{item.label}</strong>
+                        <small>현재 {item.currentPct.toFixed(2)}%</small>
+                        <small>가이드 {item.targetPct.toFixed(2)}%</small>
+                        <small className="personal-allocation-diff-copy">
+                          {item.diffPct > 0.25 ? (
+                            <>
+                              가이드보다 <strong className="metric-negative">{item.diffPct.toFixed(2)}%p</strong> 높음
+                            </>
+                          ) : item.diffPct < -0.25 ? (
+                            <>
+                              가이드보다 <strong className="metric-positive">{Math.abs(item.diffPct).toFixed(2)}%p</strong> 낮음
+                            </>
+                          ) : (
+                            "가이드와 유사"
+                          )}
+                        </small>
                       </article>
                     ))}
                   </div>
@@ -3875,6 +3915,66 @@ export function DashboardApp({ data }: Props) {
                   <span>총 현금 보유량</span>
                   <strong>{formatCurrency(baselineSummary.cash)}</strong>
                 </div>
+              </div>
+              <div className="portfolio-insights balance-chart-grid">
+                <article className="insight-card balance-chart-card">
+                  <div className="balance-chart-head">
+                    <div>
+                      <strong>종목별 현재 비중</strong>
+                      <small>현재 잔고 기준으로 각 자산을 그대로 나눠 봅니다.</small>
+                    </div>
+                  </div>
+                  <div className="comparison-body balance-chart-body">
+                    <div className="comparison-block">
+                      <div className="donut-wrap">
+                        <div className="donut-ring large" style={buildDonutStyle(baselinePortfolioSegments)}>
+                          <div className="donut-center">
+                            <strong>{formatNumber(baselinePortfolioSegments.length)}</strong>
+                            <span>현재 자산</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="comparison-legend">
+                      {baselinePortfolioLegend.map((item) => (
+                        <div className="legend-row" key={`balance-asset-${item.label}`}>
+                          <span className="legend-dot" style={{ backgroundColor: item.color }} />
+                          <strong>{item.label}</strong>
+                          <span>{formatPercent(item.pct)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </article>
+                <article className="insight-card balance-chart-card">
+                  <div className="balance-chart-head">
+                    <div>
+                      <strong>4개 자산군 비중</strong>
+                      <small>현금/예적금/채권, 금, 가상자산, 주식 기준으로 다시 묶어 봅니다.</small>
+                    </div>
+                  </div>
+                  <div className="comparison-body balance-chart-body">
+                    <div className="comparison-block">
+                      <div className="donut-wrap">
+                        <div className="donut-ring large" style={buildDonutStyle(baselineSectorSegments)}>
+                          <div className="donut-center">
+                            <strong>{formatNumber(baselineSectorSegments.length)}</strong>
+                            <span>자산군</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="comparison-legend">
+                      {baselineSectorLegend.map((item) => (
+                        <div className="legend-row" key={`balance-sector-${item.label}`}>
+                          <span className="legend-dot" style={{ backgroundColor: item.color }} />
+                          <strong>{item.label}</strong>
+                          <span>{formatPercent(item.pct)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </article>
               </div>
               <div className="portfolio-holdings-table">
                 <div className="portfolio-table-head">
