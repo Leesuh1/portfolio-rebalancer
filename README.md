@@ -1,7 +1,34 @@
 # 모두의 ETF
 
+[![Deploy](https://img.shields.io/badge/Vercel-Live%20Demo-111827?logo=vercel&logoColor=white)](https://portfolio-rebalancer-alpha.vercel.app/)
+![Next.js](https://img.shields.io/badge/Next.js-15-111827?logo=nextdotjs&logoColor=white)
+![React](https://img.shields.io/badge/React-19-0f172a?logo=react&logoColor=61dafb)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-1d4ed8?logo=typescript&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-Auth%20%26%20Storage-065f46?logo=supabase&logoColor=3ecf8e)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Data%20Refresh-1d4ed8?logo=githubactions&logoColor=white)
+![Python](https://img.shields.io/badge/Python-Data%20Snapshot-1e3a8a?logo=python&logoColor=ffd43b)
+
+[배포 링크 바로가기](https://portfolio-rebalancer-alpha.vercel.app/) · [GitHub Actions 데이터 갱신 워크플로](https://github.com/Leesuh1/portfolio-rebalancer/actions)
+
+![모두의 ETF 대표 이미지](./web/public/og-image.svg)
+
 투자 성향, 자산배분, 추천 포트폴리오, 실제 보유 포트 관리까지 하나의 흐름으로 연결한 자산배분 기반 포트폴리오 관리 웹앱입니다.  
 추천 포트폴리오를 확인하는 데서 끝나지 않고, 로그인 후에는 보유 자산을 저장하고 `거래 입력 → 장바구니 → 비교 → 확정` 흐름으로 포트폴리오를 업데이트하거나 리밸런싱할 수 있도록 구성했습니다.
+
+## 바로 보기
+
+- 배포 주소: [https://portfolio-rebalancer-alpha.vercel.app/](https://portfolio-rebalancer-alpha.vercel.app/)
+- 로그인 전: 추천 포트폴리오와 자산배분 가이드를 중심으로 확인 가능
+- 로그인 후: 포트폴리오 저장, 거래 입력, 장바구니, 업데이트 비교, 리밸런싱까지 사용 가능
+
+## 화면 미리보기
+
+- 랜딩: 추천 포트폴리오, 추천 방식, 저장 방식을 첫 화면에서 한 번에 확인
+- 자산배분 가이드: 투자 성향, 환율, 총 평가금액 기준 자산 배분, 내 현재 자산 비중을 함께 비교
+- 국내주식 추천 포트폴리오: 상위 10개 추천 종목과 점수, 목표 비중, 목표 금액, 목표 주수를 제공
+- 내 포트 관리하기: 종목별 현재 비중, 자산군 비중, 손익 현황, 저장된 포트 관리 기능 제공
+- 거래 입력 / 장바구니: 국내주식과 멀티자산 거래를 장바구니에 담고 단가를 조정한 뒤 확정
+- 포트폴리오 업데이트 / 리밸런싱 비교: 변경 전후 도넛 차트, 수량 변화, 실행 순서를 비교 후 확정
 
 ## 프로젝트 목적
 
