@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-16T07:49:46.148577",
+  "generatedAt": "2026-03-16T08:21:38.538696",
   "exchangeRate": {
     "value": 1497.5,
     "asOf": "2026-03-16",
@@ -40,8 +40,8 @@
       "name": "비트코인",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 107657000.0,
-      "nativePrice": 107657000.0,
+      "currentPrice": 107652000.0,
+      "nativePrice": 107652000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-03-16",
       "quantityStep": 1e-06,
@@ -54,8 +54,8 @@
       "name": "이더리움",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 3298000.0,
-      "nativePrice": 3298000.0,
+      "currentPrice": 3299000.0,
+      "nativePrice": 3299000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-03-16",
       "quantityStep": 1e-06,
