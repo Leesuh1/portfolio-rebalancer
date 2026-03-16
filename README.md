@@ -36,15 +36,27 @@
 
 ### 투자 성향 / 자산배분 가이드
 
-![자산배분 가이드 화면](./images/portfolio-overview.png)
+![자산배분 가이드 화면](./images/allocation-guide.png)
 
 ### 국내주식 추천 포트폴리오 / 종목 분석
 
 ![추천 포트폴리오와 종목 분석 화면](./images/recommendation-analysis.png)
 
-### 내 포트 관리하기 / 거래 장바구니
+### 내 포트 관리하기
+
+![내 포트 관리하기 화면](./images/portfolio-overview.png)
+
+### 거래 입력 / 장바구니
 
 ![거래 장바구니 화면](./images/trade-cart.png)
+
+### 포트폴리오 업데이트 비교
+
+![포트폴리오 업데이트 비교 화면](./images/update-compare.png)
+
+### 추천 포트폴리오 기반 리밸런싱 실행
+
+![리밸런싱 실행 화면](./images/rebalancing-execution.png)
 
 ## 프로젝트 목적
 
