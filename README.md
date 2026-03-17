@@ -1,14 +1,17 @@
 # 모두의 ETF
 
-[![Deploy](https://img.shields.io/badge/Vercel-Live%20Demo-111827?logo=vercel&logoColor=white)](https://portfolio-rebalancer-alpha.vercel.app/)
+<p align="center">
+  <a href="https://portfolio-rebalancer-alpha.vercel.app/">
+    <img src="https://img.shields.io/badge/LIVE_DEMO-모두의_ETF_바로가기-5b9cff?style=for-the-badge&logo=vercel&logoColor=white&labelColor=111827" alt="배포 링크 바로가기" />
+  </a>
+</p>
+
 ![Next.js](https://img.shields.io/badge/Next.js-15-111827?logo=nextdotjs&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-0f172a?logo=react&logoColor=61dafb)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-1d4ed8?logo=typescript&logoColor=white)
 ![Supabase](https://img.shields.io/badge/Supabase-Auth%20%26%20Storage-065f46?logo=supabase&logoColor=3ecf8e)
 ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Data%20Refresh-1d4ed8?logo=githubactions&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-Data%20Snapshot-1e3a8a?logo=python&logoColor=ffd43b)
-
-[배포 링크 바로가기](https://portfolio-rebalancer-alpha.vercel.app/) · [GitHub Actions 데이터 갱신 워크플로](https://github.com/Leesuh1/portfolio-rebalancer/actions)
 
 ![모두의 ETF 대표 이미지](./web/public/og-image.svg)
 
