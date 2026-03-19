@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from io import StringIO
 import json
 from pathlib import Path
 import re
+import time
 
 import numpy as np
 import pandas as pd
@@ -27,6 +29,7 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 WEB_PUBLIC_DATA_DIR = BASE_DIR / "web" / "public" / "data"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 20
+REQUEST_RETRIES = 4
 ETF_NAME_KEYWORDS = (
     "ETF",
     "ETN",
@@ -138,21 +141,67 @@ def build_external_date_label(raw_label: str | None) -> str | None:
     return raw_label.strip()
 
 
+def build_external_datetime_label(raw_label: str | None) -> str | None:
+    if not raw_label:
+        return None
+
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})", raw_label)
+    if iso_match:
+        return f"{iso_match.group(1)} {iso_match.group(2)}"
+
+    month_day_match = re.search(r"(\d{2})\.(\d{2})\.\s+(\d{2}:\d{2})", raw_label)
+    if month_day_match:
+        now = datetime.now()
+        return f"{now.year}-{month_day_match.group(1)}-{month_day_match.group(2)} {month_day_match.group(3)}"
+
+    return raw_label.strip()
+
+def request_with_retry(url: str, method: str = "get", timeout: int = REQUEST_TIMEOUT) -> requests.Response | None:
+    for attempt in range(REQUEST_RETRIES):
+        try:
+            response = requests.request(method, url, headers=REQUEST_HEADERS, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.RequestException:
+            if attempt == REQUEST_RETRIES - 1:
+                return None
+            time.sleep(1.5 ** attempt)
+    return None
+
+
+def extract_fnguide_stock_name(html: BeautifulSoup, fallback_code: str) -> str:
+    title_node = html.find("h1")
+    if title_node is not None:
+        title_text = title_node.get_text(strip=True)
+        if title_text:
+            return title_text
+
+    title_tag = html.find("title")
+    if title_tag is not None:
+        title_text = title_tag.get_text(strip=True)
+        if title_text:
+            return title_text.split("-")[0].strip()
+
+    return fallback_code
+
+
 def fetch_text(url: str) -> str | None:
     try:
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        response = request_with_retry(url)
+        if response is None:
+            return None
         return response.text
     except Exception:
         return None
 
 
-def fetch_stooq_price(ticker: str) -> tuple[float, str | None] | None:
-    csv = fetch_text(f"https://stooq.com/q/l/?s={ticker}&i=d")
-    if not csv:
+def fetch_stooq_metrics(ticker: str) -> tuple[float, str | None, float | None] | None:
+    latest_csv = fetch_text(f"https://stooq.com/q/l/?s={ticker}&i=d")
+    history_csv = fetch_text(f"https://stooq.com/q/d/l/?s={ticker}&i=d")
+    if not latest_csv:
         return None
 
-    parts = csv.strip().split(",")
+    parts = latest_csv.strip().split(",")
     if len(parts) < 7:
         return None
 
@@ -161,13 +210,25 @@ def fetch_stooq_price(ticker: str) -> tuple[float, str | None] | None:
     if price is None:
         return None
 
-    return price, build_external_date_label(date)
+    change_pct = None
+    if history_csv:
+        lines = [line for line in history_csv.strip().splitlines()[1:] if line]
+        if len(lines) >= 2:
+            previous_row = lines[-2].split(",")
+            if len(previous_row) >= 5 and previous_row[4] not in {"", "N/D"}:
+                previous_close = float(previous_row[4])
+                if previous_close > 0:
+                    change_pct = ((price - previous_close) / previous_close) * 100
+
+    return price, build_external_date_label(date), change_pct
 
 
 def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, object]]]:
     exchange_rate = {
         "value": 1400,
         "asOf": None,
+        "updatedAt": None,
+        "changePct": None,
         "source": "네이버 증권 fallback",
         "fallback": True,
     }
@@ -176,10 +237,14 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
     if exchange_html:
         price_match = re.search(r'"closePrice":"([\d,]+\.\d+)"', exchange_html)
         date_match = re.search(r'"localTradedAt":"([^"]+)"', exchange_html)
+        ratio_match = re.search(r'"fluctuationsRatio":"?(-?[\d.]+)"?', exchange_html)
+        visible_time_match = re.search(r"<time>(\d{2}\.\d{2}\.\s+\d{2}:\d{2})</time><span[^>]*>실시간</span>", exchange_html)
         if price_match:
             exchange_rate = {
                 "value": float(price_match.group(1).replace(",", "")),
                 "asOf": build_external_date_label(date_match.group(1) if date_match else None),
+                "updatedAt": build_external_datetime_label(visible_time_match.group(1) if visible_time_match else (date_match.group(1) if date_match else None)),
+                "changePct": float(ratio_match.group(1)) if ratio_match else None,
                 "source": "네이버 증권",
                 "fallback": False,
             }
@@ -195,6 +260,7 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
             "nativePrice": 1,
             "nativeCurrency": "USD",
             "tradedAt": exchange_rate["asOf"],
+            "changePct": exchange_rate.get("changePct"),
             "quantityStep": 0.01,
             "quantityPrecision": 2,
             "unitLabel": "USD",
@@ -202,9 +268,9 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
         }
     ]
 
-    gld_result = fetch_stooq_price("gld.us")
+    gld_result = fetch_stooq_metrics("gld.us")
     if gld_result:
-        native_price, traded_at = gld_result
+        native_price, traded_at, change_pct = gld_result
         assets.append(
             {
                 "code": "ALT:GLD",
@@ -215,6 +281,7 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
                 "nativePrice": native_price,
                 "nativeCurrency": "USD",
                 "tradedAt": traded_at,
+                "changePct": change_pct,
                 "quantityStep": 1,
                 "quantityPrecision": 0,
                 "unitLabel": "주",
@@ -231,6 +298,7 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
             continue
         price_match = re.search(r'"tradePrice":([\d.]+)', html)
         traded_at_match = re.search(r'"koreaTradedAt":"([^"]+)"', html)
+        ratio_match = re.search(r'"fluctuationsRatio":(-?[\d.]+)', html) or re.search(r'"changeRate":(-?[\d.]+)', html)
         if not price_match:
             continue
         price = float(price_match.group(1))
@@ -244,6 +312,7 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
                 "nativePrice": price,
                 "nativeCurrency": "KRW",
                 "tradedAt": build_external_date_label(traded_at_match.group(1) if traded_at_match else None),
+                "changePct": float(ratio_match.group(1)) if ratio_match else None,
                 "quantityStep": 0.000001,
                 "quantityPrecision": 6,
                 "unitLabel": unit,
@@ -252,10 +321,10 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
         )
 
     for item in US_TOP_ASSETS:
-        result = fetch_stooq_price(item["ticker"])
+        result = fetch_stooq_metrics(item["ticker"])
         if not result:
             continue
-        native_price, traded_at = result
+        native_price, traded_at, change_pct = result
         assets.append(
             {
                 "code": item["code"],
@@ -266,6 +335,7 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
                 "nativePrice": native_price,
                 "nativeCurrency": "USD",
                 "tradedAt": traded_at,
+                "changePct": change_pct,
                 "quantityStep": 1,
                 "quantityPrecision": 0,
                 "unitLabel": "주",
@@ -278,32 +348,66 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
 
 def load_fnguide_html(gicode: str) -> BeautifulSoup:
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode={gicode}"
-    response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    response = request_with_retry(url)
+    if response is None:
+        raise ConnectionError(f"FnGuide 요청 실패: {gicode}")
     return BeautifulSoup(response.text, "html.parser")
+
+
+def parse_numeric_text(text: str) -> float | None:
+    cleaned = text.replace(",", "").strip()
+    if cleaned in {"", "-", "N/A"}:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def normalize_financial_item(item: str) -> str:
+    revenue_aliases = {"매출액", "영업수익", "이자수익", "순영업수익"}
+    if item in revenue_aliases:
+        return "매출액"
+    if item == "영업이익(발표기준)":
+        return "영업이익(발표기준)"
+    if item == "당기순이익":
+        return "당기순이익"
+    if item == "영업이익":
+        return "영업이익"
+    if item == "ROE" or item.startswith("ROE(") or item.startswith("ROE(%"):
+        return "ROE"
+    return item
 
 
 def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tuple[pd.DataFrame, int]:
     tables = html.find_all("table", class_="us_table_ty1 h_fix zigbg_no")
     table_y = tables[5]
 
+    header_rows = table_y.find_all("tr")[:2]
+    year_labels: list[int] = []
+    if len(header_rows) >= 2:
+        for cell in header_rows[1].find_all(["th", "td"]):
+            text = cell.get_text(strip=True)
+            match = re.search(r"(\d{4})/\d{2}", text)
+            if match:
+                year_labels.append(int(match.group(1)))
+
     rows = table_y.find_all("tr")
-    raw_data: dict[str, list[int | None]] = {}
-    revenue_aliases = {"매출액", "영업수익", "이자수익", "순영업수익"}
+    raw_data: dict[str, list[float | None]] = {}
 
     for row in rows:
         th = row.find("th")
         if not th:
             continue
         item = th.get_text(strip=True)
-        normalized_item = "매출액" if item in revenue_aliases else item
+        normalized_item = normalize_financial_item(item)
         if normalized_item not in target_items:
             continue
 
         values = []
         for td in row.find_all("td"):
-            text = td.get_text(strip=True).replace(",", "")
-            values.append(int(text) if text else None)
+            text = td.get_text(strip=True)
+            values.append(parse_numeric_text(text))
         raw_data[normalized_item] = values
 
     this_year = int(
@@ -317,20 +421,24 @@ def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tup
     if year_anchor_key is None:
         raise KeyError("연간 재무 핵심 항목 없음")
 
-    years = list(range(this_year - 5, this_year - 5 + len(raw_data[year_anchor_key])))
+    years = year_labels[: len(raw_data[year_anchor_key])]
+    if not years:
+        years = list(range(this_year - 5, this_year - 5 + len(raw_data[year_anchor_key])))
     operating_profit = [
         raw_data["영업이익(발표기준)"][i] if year < this_year else raw_data["영업이익"][i]
         for i, year in enumerate(years)
     ]
 
-    yearly_df = pd.DataFrame(
-        {
-            "연도": years,
-            "매출액": raw_data["매출액"],
-            "영업이익": operating_profit,
-            "당기순이익": raw_data["당기순이익"],
-        }
-    )
+    yearly_data: dict[str, list[float | None] | list[int]] = {
+        "연도": years,
+        "매출액": raw_data["매출액"],
+        "영업이익": operating_profit,
+        "당기순이익": raw_data["당기순이익"],
+    }
+    if "ROE" in raw_data:
+        yearly_data["ROE"] = raw_data["ROE"][: len(years)]
+
+    yearly_df = pd.DataFrame(yearly_data)
     return yearly_df, this_year
 
 
@@ -348,10 +456,11 @@ def get_reference_date() -> str:
 
     today = datetime.now()
     try:
-        response = requests.head("https://www.google.com", timeout=5)
-        header_date = response.headers.get("Date")
-        if header_date:
-            today = parsedate_to_datetime(header_date).astimezone().replace(tzinfo=None)
+        response = request_with_retry("https://www.google.com", method="head", timeout=5)
+        if response is not None:
+            header_date = response.headers.get("Date")
+            if header_date:
+                today = parsedate_to_datetime(header_date).astimezone().replace(tzinfo=None)
     except Exception:
         pass
 
@@ -390,8 +499,9 @@ def get_market_universe(market: str) -> pd.DataFrame:
         raise ValueError(f"지원하지 않는 시장입니다: {market}")
 
     url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&marketType={market_type}"
-    response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    response = request_with_retry(url)
+    if response is None:
+        raise ConnectionError(f"KRX 종목 목록 요청 실패: {market}")
     response.encoding = "euc-kr"
     df = pd.read_html(StringIO(response.text), flavor="lxml")[0]
     df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
@@ -425,8 +535,9 @@ def get_market_ranked_snapshot(market: str) -> pd.DataFrame:
 
     while True:
         url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        response = request_with_retry(url)
+        if response is None:
+            raise ConnectionError(f"네이버 시총 페이지 요청 실패: {market} page={page}")
         soup = BeautifulSoup(response.text, "html.parser")
         table_rows = soup.select("table.type_2 tr")
 
@@ -502,7 +613,11 @@ def get_selection_presets() -> dict[str, list[str]]:
     return presets
 
 
-def build_stock_universe(selection_presets: dict[str, list[str]], ranked_df: pd.DataFrame) -> pd.DataFrame:
+def build_stock_universe(
+    selection_presets: dict[str, list[str]],
+    ranked_df: pd.DataFrame,
+    existing_quote_map: dict[str, dict[str, float]] | None = None,
+) -> pd.DataFrame:
     ranked_frames = [get_market_ranked_snapshot("KOSPI"), get_market_ranked_snapshot("KOSDAQ")]
     combined_ranked = pd.concat(ranked_frames, ignore_index=True)
     combined_ranked["통합시총순위"] = combined_ranked["market_cap"].rank(
@@ -520,11 +635,43 @@ def build_stock_universe(selection_presets: dict[str, list[str]], ranked_df: pd.
     )
     combined = market_ranked[["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액"]].copy()
 
-    ranked_subset = pd.DataFrame(columns=["종목코드", "현재가"])
+    ranked_subset = pd.DataFrame(columns=["종목코드", "현재가", "전일종가", "전일종가대비등락률"])
     if not ranked_df.empty:
-        ranked_subset = ranked_df[["종목코드", "현재가"]].drop_duplicates("종목코드")
+        ranked_subset = ranked_df[["종목코드", "현재가", "전일종가", "전일종가대비등락률"]].drop_duplicates("종목코드")
 
     combined = combined.merge(ranked_subset, on="종목코드", how="left")
+    if existing_quote_map:
+        existing_quote_df = (
+            pd.DataFrame(
+                [
+                    {"종목코드": code, **quote}
+                    for code, quote in existing_quote_map.items()
+                    if isinstance(code, str) and quote.get("현재가") is not None
+                ]
+            )
+            .drop_duplicates("종목코드")
+        )
+        if not existing_quote_df.empty:
+            existing_quote_df = existing_quote_df.rename(
+                columns={
+                    "현재가": "기존 현재가",
+                    "전일종가": "기존 전일종가",
+                    "전일종가대비등락률": "기존 전일종가대비등락률",
+                }
+            )
+            combined = combined.merge(existing_quote_df, on="종목코드", how="left")
+            combined["가격 fallback 사용"] = combined["현재가"].isna() & combined["기존 현재가"].notna()
+            combined["현재가"] = combined["현재가"].where(combined["현재가"].notna(), combined["기존 현재가"])
+            combined["전일종가"] = combined["전일종가"].where(combined["전일종가"].notna(), combined["기존 전일종가"])
+            combined["전일종가대비등락률"] = combined["전일종가대비등락률"].where(
+                combined["전일종가대비등락률"].notna(), combined["기존 전일종가대비등락률"]
+            )
+            combined = combined.drop(columns=["기존 현재가", "기존 전일종가", "기존 전일종가대비등락률"])
+        else:
+            combined["가격 fallback 사용"] = False
+    else:
+        combined["가격 fallback 사용"] = False
+
     preset_codes = {code for codes in selection_presets.values() for code in codes}
     filtered = combined[combined["종목코드"].isin(preset_codes)].copy()
     filtered = filtered.drop_duplicates("종목코드")
@@ -550,12 +697,12 @@ def get_market_code_name_map() -> dict[str, str]:
     return code_name_map
 
 
-def pick_forecast_value(stock_df: pd.DataFrame, column: str, this_year: int) -> tuple[float | None, int | None]:
-    forecast_candidates = stock_df[stock_df["연도"] >= this_year].sort_values("연도")
+def pick_forecast_value(stock_df: pd.DataFrame, column: str, base_year: int) -> tuple[float | None, int | None]:
+    forecast_candidates = stock_df[stock_df["연도"] >= base_year + 1].sort_values("연도")
     if forecast_candidates.empty:
         return None, None
 
-    preferred_years = [this_year + 2, this_year + 1, this_year]
+    preferred_years = [base_year + 2, base_year + 1]
     for target_year in preferred_years:
         matched = forecast_candidates[forecast_candidates["연도"] == target_year]
         if matched.empty:
@@ -564,44 +711,65 @@ def pick_forecast_value(stock_df: pd.DataFrame, column: str, this_year: int) -> 
         if pd.notna(value):
             return float(value), int(target_year)
 
-    first_valid = forecast_candidates[forecast_candidates[column].notna()]
-    if first_valid.empty:
-        return None, None
+    return None, None
 
-    row = first_valid.iloc[0]
-    return float(row[column]), int(row["연도"])
+
+def pick_roe_value(stock_df: pd.DataFrame, calendar_year: int) -> tuple[float | None, int | None, str | None]:
+    if "ROE" not in stock_df.columns:
+        return None, None, None
+
+    current_year = stock_df[stock_df["연도"] == calendar_year]
+    if not current_year.empty:
+        value = current_year.iloc[0]["ROE"]
+        if pd.notna(value):
+            return float(value), int(calendar_year), "FnGuide 메인 재무테이블 올해 전망"
+
+    confirmed_year = stock_df[stock_df["연도"] == calendar_year - 1]
+    if not confirmed_year.empty:
+        value = confirmed_year.iloc[0]["ROE"]
+        if pd.notna(value):
+            return float(value), int(calendar_year - 1), "FnGuide 메인 재무테이블 작년 확정"
+
+    return None, None, None
 
 
 def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, list[str], dict[str, str]]:
     incomplete_stocks: list[str] = []
     incomplete_reasons: dict[str, str] = {}
     all_results: list[pd.DataFrame] = []
+    calendar_year = datetime.now().year
 
     for gicode in gicodes or get_top30_gicodes():
         try:
             html = load_fnguide_html(gicode)
-            stock_name = html.find("h1").get_text(strip=True)
+            stock_name = extract_fnguide_stock_name(html, gicode)
             yearly_df, this_year = parse_yearly_financials(
-                html, ["매출액", "영업이익", "영업이익(발표기준)", "당기순이익"]
+                html, ["매출액", "영업이익", "영업이익(발표기준)", "당기순이익", "ROE"]
             )
 
-            operating_forecast, operating_year = pick_forecast_value(yearly_df, "영업이익", this_year)
-            net_forecast, net_year = pick_forecast_value(yearly_df, "당기순이익", this_year)
+            operating_forecast, operating_year = pick_forecast_value(yearly_df, "영업이익", calendar_year)
+            net_forecast, net_year = pick_forecast_value(yearly_df, "당기순이익", calendar_year)
+            roe_value, roe_year, roe_source = pick_roe_value(yearly_df, calendar_year)
 
-            if operating_forecast is None or net_forecast is None:
+            if operating_forecast is None or net_forecast is None or roe_value is None:
                 incomplete_stocks.append(stock_name)
                 missing_items: list[str] = []
                 if operating_forecast is None:
                     missing_items.append("영업이익")
                 if net_forecast is None:
                     missing_items.append("당기순이익")
-                incomplete_reasons[stock_name] = f"{'·'.join(missing_items)} 전망치 없음"
+                if roe_value is None:
+                    missing_items.append("ROE")
+                incomplete_reasons[stock_name] = f"{'·'.join(missing_items)} 데이터 없음"
             else:
                 yearly_df["기준연도"] = this_year
                 yearly_df["적용 영업이익(E)"] = operating_forecast
                 yearly_df["적용 영업이익 기준연도"] = operating_year
                 yearly_df["적용 당기순이익(E)"] = net_forecast
                 yearly_df["적용 당기순이익 기준연도"] = net_year
+                yearly_df["적용 ROE(E)"] = roe_value
+                yearly_df["적용 ROE 기준연도"] = roe_year
+                yearly_df["적용 ROE 소스"] = roe_source
                 yearly_df["종목코드"] = gicode
                 yearly_df["종목명"] = stock_name
                 all_results.append(yearly_df)
@@ -643,33 +811,86 @@ def calc_avg_growth(start: float, end: float, years: int) -> float:
 def get_market_cap(gicode: str) -> float:
     html = load_fnguide_html(gicode)
     try:
-        cap_text = (
-            html.find("th", string="시가총액").find_next_sibling("td").get_text(strip=True)
-        )
+        cap_label = html.find("th", string="시가총액")
+        cap_cell = cap_label.find_next_sibling("td") if cap_label is not None else None
+        if cap_cell is None:
+            return np.nan
+        cap_text = cap_cell.get_text(strip=True)
         return float(cap_text.replace(",", ""))
     except Exception:
         return np.nan
 
 
-def get_current_price(gicode: str) -> float:
+def get_current_quote(gicode: str) -> dict[str, float]:
     ticker = gicode.replace("A", "")
     url = f"https://finance.naver.com/item/main.naver?code={ticker}"
     try:
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        response = request_with_retry(url)
+        if response is None:
+            return {"현재가": np.nan, "전일종가": np.nan, "전일종가대비등락률": np.nan}
         soup = BeautifulSoup(response.text, "html.parser")
         blind = soup.select_one("p.no_today span.blind")
         if blind is None:
-            return np.nan
-        return float(blind.get_text(strip=True).replace(",", ""))
+            return {"현재가": np.nan, "전일종가": np.nan, "전일종가대비등락률": np.nan}
+        current_price = float(blind.get_text(strip=True).replace(",", ""))
+        exday_node = soup.select_one("p.no_exday")
+        blind_values = [node.get_text(strip=True).replace(",", "") for node in soup.select("p.no_exday em span.blind")]
+        change_amount = float(blind_values[0]) if len(blind_values) >= 1 else np.nan
+        daily_change_pct = float(blind_values[1]) if len(blind_values) >= 2 else np.nan
+
+        previous_close = np.nan
+        if pd.notna(change_amount):
+            exday_text = exday_node.get_text(" ", strip=True) if exday_node else ""
+            if "상승" in exday_text:
+                previous_close = current_price - change_amount
+            elif "하락" in exday_text:
+                previous_close = current_price + change_amount
+            else:
+                previous_close = current_price
+
+        return {
+            "현재가": current_price,
+            "전일종가": previous_close,
+            "전일종가대비등락률": daily_change_pct,
+        }
     except Exception:
-        return np.nan
+        return {"현재가": np.nan, "전일종가": np.nan, "전일종가대비등락률": np.nan}
+
+
+def load_existing_quote_snapshot() -> dict[str, dict[str, float]]:
+    snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    if not snapshot_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    quote_map: dict[str, dict[str, float]] = {}
+    for collection_name in ["allRankings", "stockUniverse"]:
+        for row in payload.get(collection_name, []) or []:
+            code = row.get("종목코드")
+            if not isinstance(code, str):
+                continue
+            current_price = row.get("현재가")
+            previous_close = row.get("전일종가")
+            daily_change_pct = row.get("전일종가대비등락률")
+            if current_price is None:
+                continue
+            quote_map[code] = {
+                "현재가": current_price,
+                "전일종가": previous_close,
+                "전일종가대비등락률": daily_change_pct,
+            }
+    return quote_map
 
 
 def get_finance_ratio_table(gicode: str) -> pd.DataFrame:
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_FinanceRatio.asp?pGB=1&gicode={gicode}"
-    response = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    response = request_with_retry(url)
+    if response is None:
+        raise ConnectionError(f"재무비율 요청 실패: {gicode}")
     tables = pd.read_html(StringIO(response.text))
     if not tables:
         raise ValueError("재무비율 테이블 없음")
@@ -728,13 +949,14 @@ def calc_per(market_cap: float, profit: float) -> float:
     return market_cap / profit
 
 
-def build_result_df(final_df: pd.DataFrame) -> pd.DataFrame:
+def build_result_df(final_df: pd.DataFrame, existing_quote_map: dict[str, dict[str, float]] | None = None) -> pd.DataFrame:
     result_rows: list[dict[str, float | str]] = []
+    calendar_year = datetime.now().year
+    existing_quote_map = existing_quote_map or {}
 
     for gicode in final_df["종목코드"].unique():
         stock_df = final_df[final_df["종목코드"] == gicode].sort_values("연도")
-        this_year = int(stock_df["기준연도"].dropna().iloc[0]) if "기준연도" in stock_df.columns else datetime.now().year
-        confirmed_row = stock_df[stock_df["연도"] == this_year - 1]
+        confirmed_row = stock_df[stock_df["연도"] == calendar_year - 1]
 
         if confirmed_row.empty:
             continue
@@ -743,19 +965,28 @@ def build_result_df(final_df: pd.DataFrame) -> pd.DataFrame:
         confirmed = confirmed_row.iloc[0]
         operating_forecast = stock_df["적용 영업이익(E)"].dropna().iloc[0] if "적용 영업이익(E)" in stock_df.columns else np.nan
         net_forecast = stock_df["적용 당기순이익(E)"].dropna().iloc[0] if "적용 당기순이익(E)" in stock_df.columns else np.nan
-        operating_target_year = int(stock_df["적용 영업이익 기준연도"].dropna().iloc[0]) if "적용 영업이익 기준연도" in stock_df.columns else this_year + 2
-        net_target_year = int(stock_df["적용 당기순이익 기준연도"].dropna().iloc[0]) if "적용 당기순이익 기준연도" in stock_df.columns else this_year + 2
-        operating_growth_years = max(1, operating_target_year - (this_year - 1))
-        net_growth_years = max(1, net_target_year - (this_year - 1))
+        forecast_roe = stock_df["적용 ROE(E)"].dropna().iloc[0] if "적용 ROE(E)" in stock_df.columns and stock_df["적용 ROE(E)"].notna().any() else np.nan
+        operating_target_year = int(stock_df["적용 영업이익 기준연도"].dropna().iloc[0]) if "적용 영업이익 기준연도" in stock_df.columns else calendar_year + 2
+        net_target_year = int(stock_df["적용 당기순이익 기준연도"].dropna().iloc[0]) if "적용 당기순이익 기준연도" in stock_df.columns else calendar_year + 2
+        roe_target_year = int(stock_df["적용 ROE 기준연도"].dropna().iloc[0]) if "적용 ROE 기준연도" in stock_df.columns and stock_df["적용 ROE 기준연도"].notna().any() else calendar_year - 1
+        operating_growth_years = max(1, operating_target_year - (calendar_year - 1))
+        net_growth_years = max(1, net_target_year - (calendar_year - 1))
         market_cap = get_market_cap(gicode)
-        current_price = get_current_price(gicode)
+        live_quote = get_current_quote(gicode)
+        fallback_quote = existing_quote_map.get(gicode)
+        use_fallback_quote = pd.isna(live_quote["현재가"]) and fallback_quote is not None
+        quote = fallback_quote if use_fallback_quote else live_quote
         quality_metrics = get_quality_metrics(gicode)
+        roe_source = stock_df["적용 ROE 소스"].dropna().iloc[0] if "적용 ROE 소스" in stock_df.columns and stock_df["적용 ROE 소스"].notna().any() else "없음"
 
         result_rows.append(
             {
                 "종목코드": gicode,
                 "종목명": stock_name,
-                "현재가": current_price,
+                "현재가": quote["현재가"],
+                "전일종가": quote["전일종가"],
+                "전일종가대비등락률": quote["전일종가대비등락률"],
+                "가격 fallback 사용": use_fallback_quote,
                 "작년 영업이익": confirmed["영업이익"],
                 "작년 당기순이익": confirmed["당기순이익"],
                 "내후년 영업이익(E)": operating_forecast,
@@ -767,7 +998,9 @@ def build_result_df(final_df: pd.DataFrame) -> pd.DataFrame:
                 "시가총액": market_cap,
                 "영업이익_PER": calc_per(market_cap, operating_forecast),
                 "순이익_PER": calc_per(market_cap, net_forecast),
-                "ROE": quality_metrics["ROE"],
+                "ROE": forecast_roe,
+                "ROE 기준연도": roe_target_year,
+                "ROE 소스": roe_source,
                 "순차입금비율": quality_metrics["순차입금비율"],
                 "부채비율": quality_metrics["부채비율"],
                 "자기자본비율": quality_metrics["자기자본비율"],
@@ -1226,15 +1459,52 @@ def save_csv_outputs(final_df: pd.DataFrame, result_df: pd.DataFrame, ranked_df:
     ranked_df.to_csv(OUTPUT_DIR / "ranked_portfolio.csv", index=False, encoding="utf-8-sig")
 
 
+def load_existing_final_df() -> pd.DataFrame | None:
+    source_path = OUTPUT_DIR / "financials_raw.csv"
+    if not source_path.exists():
+        return None
+    try:
+        return pd.read_csv(source_path, encoding="utf-8-sig")
+    except Exception:
+        return None
+
+
+def load_existing_snapshot_meta() -> dict[str, str | None]:
+    snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    if not snapshot_path.exists():
+        return {
+            "priceUpdatedAt": None,
+            "forecastUpdatedAt": None,
+        }
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        meta = payload.get("domesticDataMeta", {})
+        return {
+            "priceUpdatedAt": meta.get("priceUpdatedAt"),
+            "forecastUpdatedAt": meta.get("forecastUpdatedAt"),
+            "priceFallbackCount": meta.get("priceFallbackCount"),
+        }
+    except Exception:
+        return {
+            "priceUpdatedAt": None,
+            "forecastUpdatedAt": None,
+            "priceFallbackCount": None,
+        }
+
+
 def write_web_snapshot(
     ranked_df: pd.DataFrame,
     portfolio_df: pd.DataFrame,
+    stock_universe: pd.DataFrame,
     incomplete_list: list[str],
     incomplete_reasons: dict[str, str],
     invest_amount: int,
     profile: str,
     selected_count: int,
     selected_gicodes: list[str],
+    price_updated_at: str,
+    forecast_updated_at: str | None,
+    price_fallback_count: int = 0,
 ) -> Path:
     OUTPUT_DIR.mkdir(exist_ok=True)
     snapshot_path = OUTPUT_DIR / "dashboard_data.json"
@@ -1242,7 +1512,6 @@ def write_web_snapshot(
     public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
     top10 = ranked_df.head(10).copy()
     selection_presets = get_selection_presets()
-    stock_universe = build_stock_universe(selection_presets, ranked_df)
     market_code_name_map = get_market_code_name_map()
     code_name_map = {
         row["종목코드"]: row["종목명"]
@@ -1271,6 +1540,11 @@ def write_web_snapshot(
 
     payload = {
         "generatedAt": datetime.now().isoformat(),
+        "domesticDataMeta": {
+            "priceUpdatedAt": price_updated_at,
+            "forecastUpdatedAt": forecast_updated_at,
+            "priceFallbackCount": price_fallback_count,
+        },
         "exchangeRate": exchange_rate,
         "extraAssetUniverse": extra_asset_universe,
         "profile": profile,
@@ -1291,7 +1565,7 @@ def write_web_snapshot(
         ),
         "topRankings": sanitize_records(
             top10,
-            ["종목코드", "랭킹", "종목명", "현재가", "종합점수_100", "성장점수", "저평가점수", "ROE점수", "순현금점수", "투자스타일"],
+            ["종목코드", "랭킹", "종목명", "현재가", "전일종가", "전일종가대비등락률", "종합점수_100", "성장점수", "저평가점수", "ROE점수", "순현금점수", "투자스타일"],
         ),
         "allRankings": sanitize_records(
             ranked_df,
@@ -1300,6 +1574,8 @@ def write_web_snapshot(
                 "랭킹",
                 "종목명",
                 "현재가",
+                "전일종가",
+                "전일종가대비등락률",
                 "종합점수_100",
                 "성장점수",
                 "저평가점수",
@@ -1323,7 +1599,7 @@ def write_web_snapshot(
         ),
         "stockUniverse": sanitize_records(
             stock_universe,
-            ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액", "현재가"],
+            ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액", "현재가", "전일종가", "전일종가대비등락률"],
         ),
     }
 
@@ -1334,16 +1610,47 @@ def write_web_snapshot(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--price-only", action="store_true", help="Reuse the latest forecast snapshot and refresh current prices only.")
+    args = parser.parse_args()
+
     top_n = 10
     invest_amount = 20_000_000
     profile = "균형형"
+    now_iso = datetime.now().isoformat()
 
-    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
+    if args.price_only:
+        final_df = load_existing_final_df()
+        snapshot_meta = load_existing_snapshot_meta()
+        if final_df is None:
+            final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
+            forecast_updated_at = now_iso
+        else:
+            incomplete_list = []
+            incomplete_reasons = {}
+            forecast_updated_at = snapshot_meta.get("forecastUpdatedAt")
+    else:
+        final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
+        forecast_updated_at = now_iso
+
     print(f"incomplete stocks: {incomplete_list}")
 
-    result_df = build_result_df(final_df)
+    existing_quote_map = load_existing_quote_snapshot()
+    result_df = build_result_df(final_df, existing_quote_map=existing_quote_map)
     ranked_df = build_ranked_df(result_df, profile=profile)
     portfolio_df = build_portfolio_df(ranked_df, top_n=top_n, invest_amount=invest_amount)
+    selection_presets = get_selection_presets()
+    stock_universe = build_stock_universe(selection_presets, ranked_df, existing_quote_map=existing_quote_map)
+    price_fallback_codes = set()
+    if "가격 fallback 사용" in result_df.columns:
+        price_fallback_codes.update(
+            result_df.loc[result_df["가격 fallback 사용"].fillna(False).astype(bool), "종목코드"].astype(str).tolist()
+        )
+    if "가격 fallback 사용" in stock_universe.columns:
+        price_fallback_codes.update(
+            stock_universe.loc[stock_universe["가격 fallback 사용"].fillna(False).astype(bool), "종목코드"].astype(str).tolist()
+        )
+    price_fallback_count = len(price_fallback_codes)
 
     bar_fig = build_bar_figure(result_df)
     bubble_fig = build_bubble_figure(ranked_df)
@@ -1353,12 +1660,16 @@ def main() -> None:
     write_web_snapshot(
         ranked_df=ranked_df,
         portfolio_df=portfolio_df,
+        stock_universe=stock_universe,
         incomplete_list=incomplete_list,
         incomplete_reasons=incomplete_reasons,
         invest_amount=invest_amount,
         profile=profile,
         selected_count=len(get_top30_gicodes()),
         selected_gicodes=get_top30_gicodes(),
+        price_updated_at=now_iso,
+        forecast_updated_at=forecast_updated_at,
+        price_fallback_count=price_fallback_count,
     )
     dashboard_path = write_dashboard(ranked_df, portfolio_df, bar_fig, bubble_fig, heatmap_fig)
 

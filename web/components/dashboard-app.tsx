@@ -44,9 +44,12 @@ type AssetCandidate = {
   name: string;
   market: string;
   price: number;
+  previousClose?: number;
+  dailyChangePct?: number;
   nativePrice?: number;
   nativeCurrency?: string;
   priceInputMode?: "krw" | "usd";
+  tradedAt?: string | null;
   quantityStep: number;
   quantityPrecision: number;
   unitLabel: string;
@@ -72,6 +75,10 @@ type StorageEnvelope = {
   activeProfileId: string | null;
   lastSession: SavedProfile | null;
   profiles: SavedProfile[];
+};
+
+type UiStateEnvelope = {
+  workspaceMode?: WorkspaceMode;
 };
 
 type VisiblePortfolioRow = {
@@ -131,6 +138,9 @@ const createProfileQuickAdds = [5_000_000, 10_000_000, 100_000_000] as const;
 const cashAdjustmentQuickAdds = [100_000, 500_000, 1_000_000, 5_000_000] as const;
 const visiblePickerLimit = 100;
 const storageKey = "portfolio-rebalancer-profiles-v1";
+const uiStateKey = "portfolio-rebalancer-ui-v1";
+const scrollStateKey = "portfolio-rebalancer-scroll-v1";
+const firstLoginKey = "portfolio-rebalancer-first-login-v1";
 const exchangeRateFloor = 1300;
 const exchangeRateCeiling = 1500;
 const assetAllocationPresets = {
@@ -189,6 +199,10 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("ko-KR").format(value);
 }
 
+function formatOptionalCurrency(value: number | null | undefined) {
+  return Number.isFinite(value ?? NaN) ? formatCurrency(value as number) : "-";
+}
+
 function getKoreanTickSize(price: number) {
   if (price < 2_000) return 1;
   if (price < 5_000) return 5;
@@ -233,11 +247,23 @@ function formatPercent(value: number) {
   return `${value.toFixed(2)}%`;
 }
 
-function formatCompactDate(value: string | null | undefined) {
-  if (!value || value.length !== 8) {
-    return value ?? "-";
+function formatOptionalPercent(value: number | null | undefined) {
+  return Number.isFinite(value ?? NaN) ? formatPercent(value as number) : "-";
+}
+
+function formatDateTimeLabel(value: string | null | undefined) {
+  if (!value) {
+    return "-";
   }
-  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+  const normalized = value.replace("T", " ");
+  const isoLike = normalized.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/);
+  if (isoLike) {
+    return `${isoLike[1]} ${isoLike[2]}`;
+  }
+  if (value.length === 16 && value.includes("-")) {
+    return value;
+  }
+  return value;
 }
 
 function roundToPrecision(value: number, precision: number) {
@@ -789,6 +815,9 @@ export function DashboardApp({ data }: Props) {
   const factorMapRef = useRef<HTMLElement | null>(null);
   const [portfolioListHeight, setPortfolioListHeight] = useState<number | null>(null);
   const [factorPanelHeight, setFactorPanelHeight] = useState<number | null>(null);
+  const uiStateRestoredRef = useRef(false);
+  const scrollRestoredRef = useRef(false);
+  const previousAuthUserIdRef = useRef<string | null>(null);
   const [rebalanceComparison, setRebalanceComparison] = useState<{
     before: SavedProfile | null;
     after: SavedProfile | null;
@@ -816,9 +845,14 @@ export function DashboardApp({ data }: Props) {
   }, [data.investAmount, data.profile, defaultSelection]);
   const activeWeights = profileWeights[profile as keyof typeof profileWeights] ?? profileWeights.밸런스형;
   const exchangeRate = clampExchangeRate(data.exchangeRate?.value ?? 1400);
-  const exchangeRateAsOf = data.exchangeRate?.asOf;
+  const exchangeRateUpdatedAt = data.exchangeRate?.updatedAt;
   const exchangeRateSource = data.exchangeRate?.source ?? "네이버 증권";
   const exchangeRateFallback = Boolean(data.exchangeRate?.fallback);
+  const domesticPriceUpdatedAt = data.domesticDataMeta?.priceUpdatedAt ?? data.generatedAt;
+  const domesticForecastUpdatedAt = data.domesticDataMeta?.forecastUpdatedAt ?? data.generatedAt;
+  const domesticPriceFallbackCount = Number(data.domesticDataMeta?.priceFallbackCount ?? 0);
+  const domesticPriceFallbackNotice =
+    domesticPriceFallbackCount > 0 ? `일부 종목은 이전 값 포함 (${domesticPriceFallbackCount}개)` : null;
   const effectiveTotalAsset = clampAsset(totalAsset + pendingCashAdjustment);
   const activeAssetAllocation =
     assetAllocationPresets[profile as keyof typeof assetAllocationPresets] ?? assetAllocationPresets.밸런스형;
@@ -876,9 +910,12 @@ export function DashboardApp({ data }: Props) {
             name: item.name,
             market: item.market,
             price: item.currentPrice,
+            previousClose: undefined,
+            dailyChangePct: item.changePct,
             nativePrice: item.nativePrice,
             nativeCurrency: item.nativeCurrency,
             priceInputMode: item.priceInputMode ?? "krw",
+            tradedAt: item.tradedAt,
             quantityStep: item.quantityStep,
             quantityPrecision: item.quantityPrecision,
             unitLabel: item.unitLabel,
@@ -897,9 +934,12 @@ export function DashboardApp({ data }: Props) {
           name: stock["종목명"],
           market: stock["시장"] ?? "국내주식",
           price: Number(stock["현재가"] ?? rankedMap.get(code)?.["현재가"] ?? 0),
+          previousClose: Number(stock["전일종가"] ?? rankedMap.get(code)?.["전일종가"] ?? 0),
+          dailyChangePct: Number(stock["전일종가대비등락률"] ?? rankedMap.get(code)?.["전일종가대비등락률"] ?? 0),
           nativePrice: Number(stock["현재가"] ?? rankedMap.get(code)?.["현재가"] ?? 0),
           nativeCurrency: "KRW",
           priceInputMode: "krw",
+          tradedAt: domesticPriceUpdatedAt,
           quantityStep: 1,
           quantityPrecision: 0,
           unitLabel: "주",
@@ -916,9 +956,12 @@ export function DashboardApp({ data }: Props) {
           name: ranked["종목명"],
           market: "국내주식",
           price: Number(ranked["현재가"] ?? 0),
+          previousClose: Number(ranked["전일종가"] ?? 0),
+          dailyChangePct: Number(ranked["전일종가대비등락률"] ?? 0),
           nativePrice: Number(ranked["현재가"] ?? 0),
           nativeCurrency: "KRW",
           priceInputMode: "krw",
+          tradedAt: domesticPriceUpdatedAt,
           quantityStep: 1,
           quantityPrecision: 0,
           unitLabel: "주",
@@ -926,7 +969,7 @@ export function DashboardApp({ data }: Props) {
       }
       return null;
     },
-    [extraAssetMap, rankedMap, stockMap]
+    [domesticPriceUpdatedAt, extraAssetMap, rankedMap, stockMap]
   );
 
   const clampTradeQuantity = useCallback(
@@ -1284,35 +1327,35 @@ export function DashboardApp({ data }: Props) {
   const allocationDetailRows = [
     {
       key: "krw-cash",
-      label: "원화 현금",
+      label: "원화 현금 비중",
       pct: krwCashPct,
       amount: Math.round(allocationBaseAmount * (krwCashPct / 100)),
       direction: "positive" as const,
-      note: "현금·예적금·채권 내 원화 비중",
+      note: "현금/예적금/채권 자산군 안에서 원화 현금으로 배분",
     },
     {
       key: "usd-cash",
-      label: "달러 현금",
+      label: "달러 현금 비중",
       pct: usdCashPct,
       amount: Math.round(allocationBaseAmount * (usdCashPct / 100)),
       direction: "negative" as const,
-      note: "현금·예적금·채권 내 달러 비중",
+      note: "현금/예적금/채권 자산군 안에서 달러 현금으로 배분",
     },
     {
       key: "domestic-stock",
-      label: "한국주식",
+      label: "한국주식 비중",
       pct: domesticStockPct,
       amount: domesticStockBudget,
       direction: "positive" as const,
-      note: "환율 선형 보간",
+      note: "주식 자산군 안에서 환율을 반영하여 국내주식 배분",
     },
     {
       key: "overseas-stock",
-      label: "미국주식",
+      label: "미국주식 비중",
       pct: overseasStockPct,
       amount: Math.round(allocationBaseAmount * (overseasStockPct / 100)),
       direction: "negative" as const,
-      note: "해외 ETF/주식용 가이드",
+      note: "주식 자산군 안에서 환율을 반영하여 미국주식 배분",
     },
   ];
   const personalAllocation = useMemo(() => {
@@ -1435,8 +1478,7 @@ export function DashboardApp({ data }: Props) {
         ...item,
         direction,
       };
-    })
-    .sort((a, b) => Math.abs(b.diffPct) - Math.abs(a.diffPct));
+    });
 
   const visiblePortfolio = useMemo<VisiblePortfolioRow[]>(
     () =>
@@ -1468,7 +1510,7 @@ export function DashboardApp({ data }: Props) {
     const totalProfit = realizedProfitTotal + profit;
     const returnPct = principal > 0 ? (totalProfit / principal) * 100 : 0;
     const cash = Math.max(0, principal - purchaseTotal);
-    return { purchaseTotal, value, profit, returnPct, cash };
+    return { purchaseTotal, value, profit, principal, realizedProfitTotal, totalProfit, returnPct, cash };
   }, [baselineHoldings, baselineProfile?.realizedProfit, baselineProfile?.totalAsset, getAssetCandidate]);
 
   const savedProfileMetrics = useMemo(
@@ -1514,19 +1556,17 @@ export function DashboardApp({ data }: Props) {
     });
 
     let remainingCash = rebalanceBudget - spent;
-    candidates
-      .sort((a, b) => {
-        if (b.fraction !== a.fraction) {
-          return b.fraction - a.fraction;
-        }
-        return b.weightPct - a.weightPct;
-      })
-      .forEach((item) => {
+    let allocatedInPass = true;
+    while (allocatedInPass) {
+      allocatedInPass = false;
+      candidates.forEach((item) => {
         if (item.price <= remainingCash) {
           floors.set(item.code, (floors.get(item.code) ?? 0) + 1);
           remainingCash -= item.price;
+          allocatedInPass = true;
         }
       });
+    }
 
     return {
       targetShares: floors,
@@ -1895,26 +1935,41 @@ export function DashboardApp({ data }: Props) {
     return baselineHoldings
       .map((position) => {
         const aggregate = aggregatePosition(position);
-        const price = Number(getAssetCandidate(position.code)?.price ?? 0);
-        const value = aggregate.shares * price;
-        const profit = value - aggregate.purchaseTotal;
-        const returnPct = aggregate.purchaseTotal > 0 ? (profit / aggregate.purchaseTotal) * 100 : 0;
-        const weightPct = baselineSummary.value > 0 ? (value / baselineSummary.value) * 100 : 0;
+        const asset = getAssetCandidate(position.code);
+        const stock = stockMap.get(position.code);
+        const ranked = rankedMap.get(position.code);
+        const isDomesticMissingPrice =
+          !extraAssetMap.has(position.code) &&
+          (stock || ranked) != null &&
+          (stock?.["현재가"] ?? ranked?.["현재가"]) == null;
+        const hasPrice = !isDomesticMissingPrice && Number.isFinite(asset?.price ?? NaN) && Number(asset?.price) > 0;
+        const price = hasPrice ? Number(asset?.price) : null;
+        const value = hasPrice ? aggregate.shares * Number(price) : null;
+        const profit = hasPrice && value != null ? value - aggregate.purchaseTotal : null;
+        const returnPct = hasPrice && profit != null && aggregate.purchaseTotal > 0 ? (profit / aggregate.purchaseTotal) * 100 : null;
+        const weightPct = hasPrice && value != null && baselineSummary.value > 0 ? (value / baselineSummary.value) * 100 : null;
         return {
           code: position.code,
-          name: getAssetCandidate(position.code)?.name ?? position.code,
-          unitLabel: getAssetCandidate(position.code)?.unitLabel ?? "주",
+          name: asset?.name ?? position.code,
+          unitLabel: asset?.unitLabel ?? "주",
           shares: aggregate.shares,
           value,
           weightPct,
           avgBuyPrice: aggregate.avgBuyPrice,
           price,
+          dailyChangePct: Number.isFinite(asset?.dailyChangePct ?? NaN) ? asset?.dailyChangePct ?? null : null,
           returnPct,
           profit,
+          hasPrice,
         };
       })
-      .sort((a, b) => b.weightPct - a.weightPct);
-  }, [baselineHoldings, baselineSummary.value, getAssetCandidate]);
+      .sort((a, b) => (b.weightPct ?? -1) - (a.weightPct ?? -1));
+  }, [baselineHoldings, baselineSummary.value, extraAssetMap, getAssetCandidate, rankedMap, stockMap]);
+
+  const baselineMissingPriceCount = useMemo(
+    () => baselineHoldingRows.filter((item) => !item.hasPrice).length,
+    [baselineHoldingRows]
+  );
 
   const updateComparisonRows = useMemo(() => {
     const baselineMap = new Map(
@@ -2253,6 +2308,67 @@ export function DashboardApp({ data }: Props) {
   }, [resetSignedOutWorkspace, supabase]);
 
   useEffect(() => {
+    if (typeof window === "undefined" || uiStateRestoredRef.current) {
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(uiStateKey);
+      if (!raw) {
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as UiStateEnvelope;
+      if ((parsed.workspaceMode === "update" || parsed.workspaceMode === "rebalance") && (parsed.workspaceMode === "rebalance" || canManagePortfolio)) {
+        setWorkspaceMode(parsed.workspaceMode);
+      }
+    } catch {
+      // Ignore invalid UI state and continue with defaults.
+    } finally {
+      uiStateRestoredRef.current = true;
+    }
+  }, [canManagePortfolio]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !uiStateRestoredRef.current) {
+      return;
+    }
+    window.localStorage.setItem(uiStateKey, JSON.stringify({ workspaceMode } satisfies UiStateEnvelope));
+  }, [workspaceMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !storageReady || !authReady || scrollRestoredRef.current) {
+      return;
+    }
+
+    const raw = window.sessionStorage.getItem(scrollStateKey);
+    const scrollY = Number(raw);
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: Number.isFinite(scrollY) ? scrollY : 0, behavior: "auto" });
+      scrollRestoredRef.current = true;
+    });
+  }, [authReady, storageReady]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const saveScroll = () => {
+      window.sessionStorage.setItem(scrollStateKey, String(window.scrollY));
+    };
+
+    saveScroll();
+    window.addEventListener("scroll", saveScroll, { passive: true });
+    window.addEventListener("beforeunload", saveScroll);
+
+    return () => {
+      window.removeEventListener("scroll", saveScroll);
+      window.removeEventListener("beforeunload", saveScroll);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!supabaseEnabled) {
       return;
     }
@@ -2397,16 +2513,38 @@ export function DashboardApp({ data }: Props) {
   }, [confirmMessage]);
 
   useEffect(() => {
-    if (supabaseEnabled && !authUser && workspaceMode === "update") {
+    if (!supabaseEnabled || !authReady) {
+      return;
+    }
+    if (!authUser && workspaceMode === "update") {
       setWorkspaceMode("rebalance");
     }
-  }, [authUser, supabaseEnabled, workspaceMode]);
+  }, [authReady, authUser, supabaseEnabled, workspaceMode]);
 
   useEffect(() => {
-    if (supabaseEnabled && authUser) {
+    if (!supabaseEnabled || !authReady || typeof window === "undefined") {
+      return;
+    }
+
+    const currentAuthUserId = authUser?.id ?? null;
+    const loggedInNow = !previousAuthUserIdRef.current && Boolean(currentAuthUserId);
+    previousAuthUserIdRef.current = currentAuthUserId;
+
+    if (!authUser || !loggedInNow) {
+      return;
+    }
+
+    const hasCompletedFirstLogin = window.localStorage.getItem(firstLoginKey) === "done";
+    if (!hasCompletedFirstLogin) {
+      window.localStorage.setItem(firstLoginKey, "done");
+      setWorkspaceMode("update");
+      return;
+    }
+
+    if (workspaceMode !== "update" && !window.localStorage.getItem(uiStateKey)) {
       setWorkspaceMode("update");
     }
-  }, [authUser, supabaseEnabled]);
+  }, [authReady, authUser, supabaseEnabled, workspaceMode]);
 
   useEffect(() => {
     const syncHeights = () => {
@@ -3419,7 +3557,7 @@ export function DashboardApp({ data }: Props) {
               <h3>자산배분 가이드</h3>
               <p>
                 총자산을 먼저 상위 자산군으로 나누고, 주식과 현금은 환율 기준으로 국내·해외와 원화·달러 비중을
-                선형 보간합니다.
+                나눠 계산합니다.
               </p>
             </div>
           </div>
@@ -3457,44 +3595,51 @@ export function DashboardApp({ data }: Props) {
                 ))}
               </div>
               <div className="exchange-rate-panel">
-                <div className="exchange-rate-source-card">
-                  <div className="exchange-rate-source-head">
-                    <span>{exchangeRateSource}</span>
-                    <strong>{exchangeRateAsOf ? `${formatCompactDate(exchangeRateAsOf)} 기준` : "최근 영업일 기준"}</strong>
-                  </div>
-                  <div className="exchange-rate-inline-badge">
-                    <span>적용 환율</span>
-                    <strong>{formatNumber(exchangeRate)}원/USD</strong>
-                  </div>
-                  <small>
-                    {exchangeRateFallback
-                      ? "네이버 증권 환율을 읽지 못해 내부 기본값 1,400원을 사용 중입니다."
-                      : "사용자 입력 없이 네이버 증권 환율로 자동 계산합니다."}
-                  </small>
-                </div>
                 <div className="exchange-rate-legend">
-                  <div className="exchange-rate-table">
-                    <div className="exchange-rate-row exchange-rate-head">
-                      <span>환율 구간</span>
-                      <span>주식 배분</span>
-                      <span>현금 배분</span>
+                  <div className="exchange-rate-visual">
+                    <div className="exchange-rate-legend-head">
+                      <div className="exchange-rate-legend-title">
+                        <strong>원화/달러 분배 기준</strong>
+                      </div>
+                      <small>현재 환율 위치에 따라 국내·해외, 원화·달러 비중을 나눕니다.</small>
+                      <div className="exchange-rate-updated inline">
+                      <span>하나은행 환율 업데이트</span>
+                        <strong>{formatDateTimeLabel(exchangeRateUpdatedAt)}</strong>
+                      </div>
                     </div>
-                    <div className="exchange-rate-row">
-                      <strong>1,300원 이하</strong>
-                      <span>해외 100 / 국내 0</span>
-                      <span>달러 100 / 원화 0</span>
+                    <div className="exchange-rate-scale">
+                      <div className="exchange-rate-track">
+                        <div className="exchange-rate-marker" style={{ left: `${getLinearDomesticShare(exchangeRate) * 100}%` }}>
+                          <span>{formatNumber(exchangeRate)}원</span>
+                        </div>
+                      </div>
+                      <div className="exchange-rate-axis">
+                        <strong>1,300원</strong>
+                        <strong>1,400원</strong>
+                        <strong>1,500원</strong>
+                      </div>
                     </div>
-                    <div className="exchange-rate-row">
-                      <strong>1,400원</strong>
-                      <span>해외 50 / 국내 50</span>
-                      <span>달러 50 / 원화 50</span>
+                    <div className="exchange-rate-scenario-grid">
+                      <article className="exchange-rate-scenario">
+                        <strong>달러 약세 구간</strong>
+                        <span>1,300원 이하</span>
+                        <small>주식: 해외 100 / 국내 0</small>
+                        <small>현금: 달러 100 / 원화 0</small>
+                      </article>
+                      <article className="exchange-rate-scenario">
+                        <strong>중립 구간</strong>
+                        <span>1,400원</span>
+                        <small>주식: 해외 50 / 국내 50</small>
+                        <small>현금: 달러 50 / 원화 50</small>
+                      </article>
+                      <article className="exchange-rate-scenario">
+                        <strong>달러 강세 구간</strong>
+                        <span>1,500원 이상</span>
+                        <small>주식: 해외 0 / 국내 100</small>
+                        <small>현금: 달러 0 / 원화 100</small>
+                      </article>
                     </div>
-                    <div className="exchange-rate-row">
-                      <strong>1,500원 이상</strong>
-                      <span>해외 0 / 국내 100</span>
-                      <span>달러 0 / 원화 100</span>
-                    </div>
-                    <small className="exchange-rate-footnote">그 사이 구간은 선형 보간으로 비중을 계산합니다.</small>
+                    <small className="exchange-rate-footnote">1,300원과 1,500원 사이에서는 환율 위치에 따라 국내/해외, 원화/달러 비중이 점진적으로 조정됩니다.</small>
                   </div>
                 </div>
               </div>
@@ -3537,19 +3682,28 @@ export function DashboardApp({ data }: Props) {
                     {personalAllocationDiffRows.map((item) => (
                       <article className="personal-allocation-diff-row" key={`diff-${item.key}`}>
                         <strong>{item.label}</strong>
-                        <small>현재 {item.currentPct.toFixed(2)}%</small>
-                        <small>가이드 {item.targetPct.toFixed(2)}%</small>
+                        <div className="personal-allocation-compare">
+                          <div className="personal-allocation-compare-track">
+                            <span
+                              className="personal-allocation-compare-current"
+                              style={{ width: `${Math.max(0, Math.min(100, item.currentPct))}%` }}
+                            />
+                            <span
+                              className="personal-allocation-compare-guide"
+                              style={{ left: `${Math.max(0, Math.min(100, item.targetPct))}%` }}
+                            />
+                          </div>
+                          <small>
+                            현재 {item.currentPct.toFixed(2)}% · 가이드 {item.targetPct.toFixed(2)}%
+                          </small>
+                        </div>
                         <small className="personal-allocation-diff-copy">
                           {item.direction === "over" ? (
-                            <>
-                              가이드보다 <strong className="metric-negative">{item.diffPct.toFixed(2)}%p</strong> 높음
-                            </>
+                            <strong className="metric-negative">+{item.diffPct.toFixed(2)}%p</strong>
                           ) : item.direction === "under" ? (
-                            <>
-                              가이드보다 <strong className="metric-positive">{Math.abs(item.diffPct).toFixed(2)}%p</strong> 낮음
-                            </>
+                            <strong className="metric-positive">-{Math.abs(item.diffPct).toFixed(2)}%p</strong>
                           ) : (
-                            "가이드와 유사"
+                            "유사"
                           )}
                         </small>
                       </article>
@@ -3559,19 +3713,28 @@ export function DashboardApp({ data }: Props) {
                     {personalAllocation.detailRows.map((item) => (
                       <article className="personal-allocation-detail-row" key={`detail-${item.key}`}>
                         <strong>{item.label}</strong>
-                        <small>현재 {item.currentPct.toFixed(2)}%</small>
-                        <small>가이드 {item.targetPct.toFixed(2)}%</small>
+                        <div className="personal-allocation-compare">
+                          <div className="personal-allocation-compare-track">
+                            <span
+                              className="personal-allocation-compare-current"
+                              style={{ width: `${Math.max(0, Math.min(100, item.currentPct))}%` }}
+                            />
+                            <span
+                              className="personal-allocation-compare-guide"
+                              style={{ left: `${Math.max(0, Math.min(100, item.targetPct))}%` }}
+                            />
+                          </div>
+                          <small>
+                            현재 {item.currentPct.toFixed(2)}% · 가이드 {item.targetPct.toFixed(2)}%
+                          </small>
+                        </div>
                         <small className="personal-allocation-diff-copy">
                           {item.diffPct > 0.25 ? (
-                            <>
-                              가이드보다 <strong className="metric-negative">{item.diffPct.toFixed(2)}%p</strong> 높음
-                            </>
+                            <strong className="metric-negative">+{item.diffPct.toFixed(2)}%p</strong>
                           ) : item.diffPct < -0.25 ? (
-                            <>
-                              가이드보다 <strong className="metric-positive">{Math.abs(item.diffPct).toFixed(2)}%p</strong> 낮음
-                            </>
+                            <strong className="metric-positive">-{Math.abs(item.diffPct).toFixed(2)}%p</strong>
                           ) : (
-                            "가이드와 유사"
+                            "유사"
                           )}
                         </small>
                       </article>
@@ -3583,8 +3746,35 @@ export function DashboardApp({ data }: Props) {
           ) : null}
         </div>
 
-        <div className="control-card wide-card">
-          <h3>종목 카테고리</h3>
+        </>
+        ) : null}
+      </section>
+
+      {workspaceMode === "rebalance" ? (
+      <section className="panel portfolio-panel">
+        <div className="section-head compact-head">
+          <div>
+            <p className="section-kicker">Target Portfolio</p>
+            <h2>국내주식 추천 포트폴리오</h2>
+          </div>
+          <p className="section-note">현재 설정된 종목 카테고리, 투자 성향, 자산배분 비율, 환율 기준으로 산출한 국내주식 추천 포트폴리오입니다.</p>
+        </div>
+
+        <div className="asset-budget-strip single-budget-strip">
+          <div className="summary-chip compact metric-positive">
+            <span>총 평가금액 {formatCurrency(allocationBaseAmount)} 중 국내주식 배정</span>
+            <strong>{formatCurrency(domesticStockBudget)}</strong>
+          </div>
+        </div>
+        <p className="domestic-allocation-note">아래부터는 국내주식 배분 기준으로 산출한 추천 포트폴리오입니다.</p>
+        <div className="section-meta-inline">
+          <span>국내주식 현재가 업데이트 {formatDateTimeLabel(domesticPriceUpdatedAt)}</span>
+          <span>실적전망치 기준 업데이트 {formatDateTimeLabel(domesticForecastUpdatedAt)}</span>
+          {domesticPriceFallbackNotice ? <span>{domesticPriceFallbackNotice}</span> : null}
+        </div>
+
+        <div className="control-card wide-card section-divider-top">
+          <h3>국내주식 종목 카테고리</h3>
           <div className="chip-grid">
             {orderedPresetNames.map((presetName) => (
               <button
@@ -3666,29 +3856,8 @@ export function DashboardApp({ data }: Props) {
             );
           })}
         </div>
-        </>
-        ) : null}
-      </section>
 
-      {workspaceMode === "rebalance" ? (
-      <section className="panel portfolio-panel">
-        <div className="section-head compact-head">
-          <div>
-            <p className="section-kicker">Target Portfolio</p>
-            <h2>국내주식 추천 포트폴리오</h2>
-          </div>
-          <p className="section-note">현재 설정된 종목 카테고리, 투자 성향, 자산배분 비율, 환율 기준으로 산출한 국내주식 추천 포트폴리오입니다.</p>
-        </div>
-
-        <div className="asset-budget-strip single-budget-strip">
-          <div className="summary-chip compact metric-positive">
-            <span>총 평가금액 {formatCurrency(allocationBaseAmount)} 중 국내주식 배정</span>
-            <strong>{formatCurrency(domesticStockBudget)}</strong>
-          </div>
-        </div>
-        <p className="domestic-allocation-note">아래부터는 국내주식 배분 기준으로 산출한 추천 포트폴리오입니다.</p>
-
-        <div className="portfolio-layout">
+        <div className="portfolio-layout recommendation-results-block section-divider-top">
           <article className="portfolio-pie-card" ref={portfolioPieRef}>
             <div className="donut-wrap">
                 <div className="donut-ring large" style={buildDonutStyle(portfolioChartSegments)}>
@@ -3903,18 +4072,32 @@ export function DashboardApp({ data }: Props) {
                   <span>총평가손익</span>
                   <strong>{formatCurrency(baselineSummary.profit)}</strong>
                 </div>
-                <div className={`summary-chip ${baselineSummary.returnPct >= 0 ? "metric-positive" : "metric-negative"}`}>
-                  <span>총수익률</span>
-                  <strong>{formatPercent(baselineSummary.returnPct)}</strong>
-                </div>
-                <div className={`summary-chip ${(baselineProfile?.realizedProfit ?? 0) >= 0 ? "metric-positive" : "metric-negative"}`}>
+                <div className={`summary-chip ${baselineSummary.realizedProfitTotal >= 0 ? "metric-positive" : "metric-negative"}`}>
                   <span>총 실현 손익</span>
-                  <strong>{formatCurrency(Number(baselineProfile?.realizedProfit ?? 0))}</strong>
+                  <strong>{formatCurrency(baselineSummary.realizedProfitTotal)}</strong>
                 </div>
                 <div className="summary-chip">
-                  <span>총 현금 보유량</span>
+                  <span>원금</span>
+                  <strong>{formatCurrency(baselineSummary.principal)}</strong>
+                </div>
+                <div className="summary-chip">
+                  <span>잔여 현금</span>
                   <strong>{formatCurrency(baselineSummary.cash)}</strong>
                 </div>
+                <div className={`summary-chip ${baselineSummary.totalProfit >= 0 ? "metric-positive" : "metric-negative"}`}>
+                  <span>현재 수익금</span>
+                  <strong>{formatCurrency(baselineSummary.totalProfit)}</strong>
+                </div>
+                <div className={`summary-chip ${baselineSummary.returnPct >= 0 ? "metric-positive" : "metric-negative"}`}>
+                  <span>현재 수익률</span>
+                  <strong>{formatPercent(baselineSummary.returnPct)}</strong>
+                </div>
+              </div>
+              <div className="section-meta-inline balance-meta-inline">
+                <span>국내주식 현재가 업데이트 {formatDateTimeLabel(domesticPriceUpdatedAt)}</span>
+                <span>실적전망치 기준 업데이트 {formatDateTimeLabel(domesticForecastUpdatedAt)}</span>
+                {domesticPriceFallbackNotice ? <span>{domesticPriceFallbackNotice}</span> : null}
+                {baselineMissingPriceCount > 0 ? <span>가격 미확인 자산 {baselineMissingPriceCount}개는 평가 합계에서 제외</span> : null}
               </div>
               <div className="portfolio-insights balance-chart-grid">
                 <article className="insight-card balance-chart-card">
@@ -3958,8 +4141,8 @@ export function DashboardApp({ data }: Props) {
                       <div className="donut-wrap">
                         <div className="donut-ring large" style={buildDonutStyle(baselineSectorSegments)}>
                           <div className="donut-center">
-                            <strong>{formatNumber(baselineSectorSegments.length)}</strong>
-                            <span>자산군</span>
+                            <strong>{formatCurrency(baselineSummary.value + baselineSummary.cash)}</strong>
+                            <span>총 평가액 기준</span>
                           </div>
                         </div>
                       </div>
@@ -3969,7 +4152,7 @@ export function DashboardApp({ data }: Props) {
                         <div className="legend-row" key={`balance-sector-${item.label}`}>
                           <span className="legend-dot" style={{ backgroundColor: item.color }} />
                           <strong>{item.label}</strong>
-                          <span>{formatPercent(item.pct)}</span>
+                          <span>{formatPercent(item.pct)} · {formatCurrency(item.value)}</span>
                         </div>
                       ))}
                     </div>
@@ -3984,6 +4167,7 @@ export function DashboardApp({ data }: Props) {
                   <span>비중</span>
                   <span>평균 매입 단가</span>
                   <span>현재가</span>
+                  <span>전일 대비</span>
                   <span>수익률</span>
                   <span>평가손익</span>
                 </div>
@@ -3992,12 +4176,15 @@ export function DashboardApp({ data }: Props) {
                     <div className="portfolio-table-row" key={`balance-${item.code}`}>
                       <strong>{item.name}</strong>
                       <span>{formatTradeQuantity(item.code, item.shares)}{item.unitLabel}</span>
-                      <span>{formatCurrency(item.value)}</span>
-                      <span>{formatPercent(item.weightPct)}</span>
+                      <span>{formatOptionalCurrency(item.value)}</span>
+                      <span>{formatOptionalPercent(item.weightPct)}</span>
                       <span>{formatCurrency(item.avgBuyPrice)}</span>
-                      <span>{formatCurrency(item.price)}</span>
-                      <span className={item.returnPct >= 0 ? "metric-positive" : "metric-negative"}>{formatPercent(item.returnPct)}</span>
-                      <span className={item.profit >= 0 ? "metric-positive" : "metric-negative"}>{formatCurrency(item.profit)}</span>
+                      <span>{formatOptionalCurrency(item.price)}</span>
+                      <span className={item.dailyChangePct == null ? "" : item.dailyChangePct >= 0 ? "metric-positive" : "metric-negative"}>
+                        {item.hasPrice ? formatOptionalPercent(item.dailyChangePct) : "-"}
+                      </span>
+                      <span className={item.returnPct == null ? "" : item.returnPct >= 0 ? "metric-positive" : "metric-negative"}>{formatOptionalPercent(item.returnPct)}</span>
+                      <span className={item.profit == null ? "" : item.profit >= 0 ? "metric-positive" : "metric-negative"}>{formatOptionalCurrency(item.profit)}</span>
                     </div>
                   ))}
                 </div>

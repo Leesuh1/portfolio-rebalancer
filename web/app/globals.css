@@ -491,7 +491,7 @@ select {
 
 .personal-allocation-diff-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(110px, 0.7fr) minmax(0, 1.6fr) minmax(88px, 0.5fr);
   gap: 14px;
   align-items: center;
 }
@@ -503,13 +503,45 @@ select {
 
 .personal-allocation-diff-copy {
   text-align: right;
+  font-size: 1rem;
+  font-weight: 700;
 }
 
 .personal-allocation-detail-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(110px, 0.7fr) minmax(0, 1.6fr) minmax(88px, 0.5fr);
   gap: 14px;
   align-items: center;
+}
+
+.personal-allocation-compare {
+  display: grid;
+  gap: 8px;
+}
+
+.personal-allocation-compare-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-soft) 40%, var(--line) 60%);
+  overflow: visible;
+}
+
+.personal-allocation-compare-current {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--blue) 82%, white 18%) 0%, color-mix(in srgb, var(--blue-soft) 72%, white 28%) 100%);
+}
+
+.personal-allocation-compare-guide {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, white 82%, var(--ink) 18%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel) 70%, transparent 30%);
 }
 
 .asset-allocation-head {
@@ -616,26 +648,25 @@ select {
 }
 
 .exchange-rate-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-  gap: 12px;
-}
-
-.exchange-rate-source-card {
-  border-radius: 20px;
-  border: 1px solid color-mix(in srgb, var(--blue-soft) 24%, var(--line) 76%);
-  background: color-mix(in srgb, var(--panel-soft) 82%, var(--panel) 18%);
-  padding: 14px 16px;
-}
-
-.exchange-rate-source-card span,
-.exchange-rate-source-card small {
-  color: var(--muted);
-}
-
-.exchange-rate-source-card strong {
   display: block;
-  margin: 8px 0 6px;
+}
+
+.exchange-rate-updated {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.exchange-rate-updated strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.exchange-rate-updated.inline {
+  margin-bottom: 0;
 }
 
 .exchange-rate-slider {
@@ -647,43 +678,123 @@ select {
   display: block;
 }
 
-.exchange-rate-table {
-  border-radius: 20px;
-  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--blue-soft) 16%);
-  background: color-mix(in srgb, var(--panel-soft) 82%, var(--panel) 18%);
-  overflow: hidden;
-}
-
-.exchange-rate-row {
+.exchange-rate-legend-head {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.exchange-rate-legend-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   gap: 12px;
-  padding: 12px 14px;
-  align-items: center;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 88%, transparent 12%);
+}
+
+.exchange-rate-legend-title span {
+  color: var(--muted);
   font-size: 13px;
+  white-space: nowrap;
 }
 
-.exchange-rate-row:last-of-type {
-  border-bottom: none;
+.exchange-rate-legend-head strong {
+  font-size: 15px;
+  letter-spacing: -0.02em;
 }
 
-.exchange-rate-head {
-  background: color-mix(in srgb, var(--blue-soft) 18%, var(--panel) 82%);
-  font-weight: 700;
-}
-
-.exchange-rate-head span {
+.exchange-rate-legend-head small {
   color: var(--muted);
 }
 
-.exchange-rate-row strong {
+.exchange-rate-visual {
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--blue-soft) 16%);
+  background: color-mix(in srgb, var(--panel-soft) 82%, var(--panel) 18%);
+  padding: 18px 20px;
+  overflow: hidden;
+}
+
+.exchange-rate-scale {
+  padding-top: 44px;
+  margin-bottom: 16px;
+}
+
+.exchange-rate-track {
+  position: relative;
+  height: 16px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--action-bg) 0%, color-mix(in srgb, var(--blue) 34%, var(--panel) 66%) 50%, var(--danger-bg) 100%);
+}
+
+.exchange-rate-marker {
+  position: absolute;
+  top: -46px;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.exchange-rate-marker::after {
+  content: "";
+  width: 12px;
+  height: 32px;
+  border-radius: 999px;
+  background: color-mix(in srgb, white 88%, var(--blue) 12%);
+  border: 2px solid color-mix(in srgb, var(--panel) 32%, white 68%);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.28);
+}
+
+.exchange-rate-marker span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--blue-soft) 28%);
+  border: 1px solid color-mix(in srgb, var(--line) 64%, var(--blue-soft) 36%);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.exchange-rate-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exchange-rate-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.exchange-rate-scenario {
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--blue-soft) 22%);
+  background: color-mix(in srgb, var(--panel) 76%, var(--panel-soft) 24%);
+  padding: 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.exchange-rate-scenario strong {
+  font-size: 14px;
   letter-spacing: -0.02em;
+  word-break: keep-all;
+}
+
+.exchange-rate-scenario span,
+.exchange-rate-scenario small {
+  color: var(--muted);
+  word-break: keep-all;
 }
 
 .exchange-rate-footnote {
   display: block;
-  padding: 12px 14px 14px;
+  padding-top: 14px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -705,6 +816,26 @@ select {
   margin: 0 0 18px;
   color: var(--muted);
   line-height: 1.55;
+}
+
+.section-meta-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.section-meta-inline span {
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, var(--blue-soft) 18%);
+  background: color-mix(in srgb, var(--panel-soft) 84%, var(--panel) 16%);
+}
+
+.balance-meta-inline {
+  margin: 0 0 16px;
 }
 
 .save-slot-card {
@@ -1204,6 +1335,10 @@ select {
 .section-divider-top {
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+
+.recommendation-results-block {
+  margin-top: 22px;
 }
 
 .insight-card {
@@ -1732,7 +1867,7 @@ select {
 
 .balance-summary-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1750,7 +1885,7 @@ select {
 .portfolio-table-head,
 .portfolio-table-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1.15fr) 0.72fr 0.95fr 0.72fr 1fr 0.95fr 0.8fr 0.95fr;
+  grid-template-columns: minmax(160px, 1.15fr) 0.72fr 0.95fr 0.72fr 1fr 0.95fr 0.8fr 0.8fr 0.95fr;
   gap: 12px;
   align-items: center;
   padding: 14px 18px;
@@ -3003,6 +3138,10 @@ select {
     grid-template-columns: 1fr;
   }
 
+  .exchange-rate-scenario-grid {
+    grid-template-columns: 1fr;
+  }
+
   .holding-card,
   .execution-panel {
     min-height: auto;
@@ -3036,7 +3175,7 @@ select {
 
   .portfolio-table-head,
   .portfolio-table-row {
-    grid-template-columns: minmax(150px, 1.15fr) repeat(7, minmax(0, 0.9fr));
+    grid-template-columns: minmax(150px, 1.15fr) repeat(8, minmax(0, 0.9fr));
   }
 
   .portfolio-head-factors {
@@ -3104,6 +3243,10 @@ select {
   .asset-allocation-visual,
   .exchange-rate-panel,
   .personal-allocation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .exchange-rate-scenario-grid {
     grid-template-columns: 1fr;
   }
 

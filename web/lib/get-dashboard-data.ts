@@ -18,6 +18,8 @@ type RankingRow = {
   "랭킹": number;
   "종목명": string;
   "현재가"?: number;
+  "전일종가"?: number;
+  "전일종가대비등락률"?: number;
   "종합점수_100": number;
   "성장점수": number;
   "저평가점수": number;
@@ -33,9 +35,16 @@ type RankingRow = {
 
 export type DashboardData = {
   generatedAt: string;
+  domesticDataMeta?: {
+    priceUpdatedAt: string | null;
+    forecastUpdatedAt: string | null;
+    priceFallbackCount?: number | null;
+  };
   exchangeRate: {
     value: number;
     asOf: string | null;
+    updatedAt: string | null;
+    changePct?: number;
     source: string;
     fallback: boolean;
   };
@@ -48,6 +57,7 @@ export type DashboardData = {
     nativePrice: number;
     nativeCurrency: string;
     tradedAt: string | null;
+    changePct?: number;
     quantityStep: number;
     quantityPrecision: number;
     unitLabel: string;
@@ -79,14 +89,23 @@ export type DashboardData = {
     "통합시총순위"?: number;
     "시가총액"?: number;
     "현재가"?: number;
+    "전일종가"?: number;
+    "전일종가대비등락률"?: number;
   }>;
 };
 
 const fallbackData: DashboardData = {
   generatedAt: new Date().toISOString(),
+  domesticDataMeta: {
+    priceUpdatedAt: null,
+    forecastUpdatedAt: null,
+    priceFallbackCount: 0
+  },
   exchangeRate: {
     value: 1400,
     asOf: null,
+    updatedAt: null,
+    changePct: undefined,
     source: "네이버 증권 fallback",
     fallback: true
   },
@@ -109,6 +128,8 @@ const fallbackData: DashboardData = {
   stockUniverse: []
 };
 
+const EXTERNAL_ASSET_REVALIDATE_SECONDS = 60 * 20;
+
 function buildNaverExchangeDateLabel(rawLabel: string | null) {
   if (!rawLabel) {
     return null;
@@ -128,11 +149,44 @@ function buildNaverExchangeDateLabel(rawLabel: string | null) {
   return trimmed;
 }
 
+function buildNaverExchangeDateTimeLabel(rawLabel: string | null) {
+  if (!rawLabel) {
+    return null;
+  }
+  const isoMatch = rawLabel.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]} ${isoMatch[2]}`;
+  }
+
+  const trimmed = rawLabel.trim();
+  const monthDayTimeMatch = trimmed.match(/(\d{2})\.(\d{2})\.\s+(\d{2}:\d{2})/);
+  if (monthDayTimeMatch) {
+    const now = new Date();
+    return `${now.getFullYear()}-${monthDayTimeMatch[1]}-${monthDayTimeMatch[2]} ${monthDayTimeMatch[3]}`;
+  }
+
+  return trimmed;
+}
+
+function extractHanaExchangeUpdatedAt(html: string) {
+  const visibleTimeMatch = html.match(/<time>(\d{2}\.\d{2}\.\s+\d{2}:\d{2})<\/time><span[^>]*>실시간<\/span>/);
+  if (visibleTimeMatch?.[1]) {
+    return buildNaverExchangeDateTimeLabel(visibleTimeMatch[1]);
+  }
+
+  const localTradedAtMatch = html.match(/"localTradedAt":"([^"]+)"/);
+  if (localTradedAtMatch?.[1]) {
+    return buildNaverExchangeDateTimeLabel(localTradedAtMatch[1]);
+  }
+
+  return null;
+}
+
 async function getUsdKrwExchangeRate() {
   const url = "https://m.stock.naver.com/marketindex/exchange/FX_USDKRW";
   try {
     const response = await fetch(url, {
-      next: { revalidate: 60 * 60 * 6 }
+      next: { revalidate: EXTERNAL_ASSET_REVALIDATE_SECONDS }
     });
 
     if (!response.ok) {
@@ -145,6 +199,7 @@ async function getUsdKrwExchangeRate() {
       return fallbackData.exchangeRate;
     }
     const asOfMatch = html.match(/"localTradedAt":"([^"]+)"/);
+    const hanaUpdatedAt = extractHanaExchangeUpdatedAt(html);
     const parsedValue = Number(priceMatch[1].replaceAll(",", ""));
 
     if (!Number.isFinite(parsedValue)) {
@@ -154,6 +209,12 @@ async function getUsdKrwExchangeRate() {
     return {
       value: parsedValue,
       asOf: buildNaverExchangeDateLabel(asOfMatch?.[1] ?? null),
+      updatedAt: hanaUpdatedAt,
+      changePct:
+        extractJsonValue(html, /"fluctuationsRatio":"?(-?[\d.]+)"?/, (value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }) ?? undefined,
       source: "네이버 증권",
       fallback: false
     };
@@ -170,16 +231,79 @@ function extractJsonValue<T>(html: string, pattern: RegExp, parser: (value: stri
   return parser(match[1]);
 }
 
-async function getGoldEtfAsset(exchangeRate: number) {
-  const url = "https://stooq.com/q/l/?s=gld.us&i=d";
-  try {
-    const csv = await fetch(url, {
-      next: { revalidate: 60 * 60 * 6 }
-    }).then((response) => response.text());
-    const [symbol, date, _time, _open, _high, _low, close] = csv.trim().split(",");
-    const nativePrice = Number(close);
+function parseFiniteNumber(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value.replaceAll(",", ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
-    if (!symbol || !Number.isFinite(nativePrice)) {
+type StooqDailyMetrics = {
+  nativePrice: number;
+  tradedAt: string | null;
+  changePct?: number;
+};
+
+async function getStooqDailyMetrics(ticker: string): Promise<StooqDailyMetrics | null> {
+  try {
+    const [latestCsv, historyCsv] = await Promise.all([
+      fetch(`https://stooq.com/q/l/?s=${ticker}&i=d`, {
+        next: { revalidate: EXTERNAL_ASSET_REVALIDATE_SECONDS }
+      }).then((response) => response.text()),
+      fetch(`https://stooq.com/q/d/l/?s=${ticker}&i=d`, {
+        next: { revalidate: EXTERNAL_ASSET_REVALIDATE_SECONDS }
+      }).then((response) => response.text())
+    ]);
+
+    const latestParts = latestCsv.trim().split(",");
+    if (latestParts.length < 7) {
+      return null;
+    }
+
+    const [, latestDate, , , , , latestClose] = latestParts;
+    const nativePrice = parseFiniteNumber(latestClose);
+    if (nativePrice === null) {
+      return null;
+    }
+
+    const historyLines = historyCsv
+      .trim()
+      .split(/\r?\n/)
+      .slice(1)
+      .filter(Boolean);
+    const previousRow = historyLines.at(-2)?.split(",");
+    const previousClose = parseFiniteNumber(previousRow?.[4] ?? null);
+    const changePct =
+      previousClose && previousClose > 0
+        ? ((nativePrice - previousClose) / previousClose) * 100
+        : undefined;
+
+    return {
+      nativePrice,
+      tradedAt: buildNaverExchangeDateLabel(latestDate ?? null),
+      changePct
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeExtraAsset(
+  snapshotItem: DashboardData["extraAssetUniverse"][number] | undefined,
+  liveItem: DashboardData["extraAssetUniverse"][number]
+) {
+  return {
+    ...snapshotItem,
+    ...liveItem,
+    changePct: liveItem.changePct ?? snapshotItem?.changePct
+  };
+}
+
+async function getGoldEtfAsset(exchangeRate: number) {
+  try {
+    const metrics = await getStooqDailyMetrics("gld.us");
+    if (!metrics) {
       return null;
     }
 
@@ -188,10 +312,11 @@ async function getGoldEtfAsset(exchangeRate: number) {
       name: "금 (GLD)",
       market: "금",
       category: "gold" as const,
-      currentPrice: nativePrice * exchangeRate,
-      nativePrice,
+      currentPrice: metrics.nativePrice * exchangeRate,
+      nativePrice: metrics.nativePrice,
       nativeCurrency: "USD",
-      tradedAt: buildNaverExchangeDateLabel(date ?? null),
+      tradedAt: metrics.tradedAt,
+      changePct: metrics.changePct,
       quantityStep: 1,
       quantityPrecision: 0,
       unitLabel: "주",
@@ -205,7 +330,7 @@ async function getGoldEtfAsset(exchangeRate: number) {
 async function getNaverBitcoinPrice() {
   const url = "https://m.stock.naver.com/crypto/UPBIT/BTC";
   try {
-    const html = await fetch(url, { next: { revalidate: 60 * 60 * 1 } }).then((response) => response.text());
+    const html = await fetch(url, { next: { revalidate: EXTERNAL_ASSET_REVALIDATE_SECONDS } }).then((response) => response.text());
     const price = extractJsonValue(html, /"tradePrice":([\d.]+)/, (value) => {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : null;
@@ -222,13 +347,23 @@ async function getNaverBitcoinPrice() {
       category: "crypto" as const,
       currentPrice: price,
       nativePrice: price,
-    nativeCurrency: "KRW",
-    tradedAt: buildNaverExchangeDateLabel(extractJsonValue(html, /"koreaTradedAt":"([^"]+)"/, (value) => value)),
-    quantityStep: 0.000001,
-    quantityPrecision: 6,
-    unitLabel: "BTC",
-    priceInputMode: "krw" as const
-  };
+      nativeCurrency: "KRW",
+      tradedAt: buildNaverExchangeDateLabel(extractJsonValue(html, /"koreaTradedAt":"([^"]+)"/, (value) => value)),
+      changePct:
+        extractJsonValue(html, /"fluctuationsRatio":(-?[\d.]+)/, (value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }) ??
+        extractJsonValue(html, /"changeRate":(-?[\d.]+)/, (value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }) ??
+        undefined,
+      quantityStep: 0.000001,
+      quantityPrecision: 6,
+      unitLabel: "BTC",
+      priceInputMode: "krw" as const
+    };
   } catch {
     return null;
   }
@@ -237,7 +372,7 @@ async function getNaverBitcoinPrice() {
 async function getNaverEthereumPrice() {
   const url = "https://m.stock.naver.com/crypto/UPBIT/ETH";
   try {
-    const html = await fetch(url, { next: { revalidate: 60 * 60 * 1 } }).then((response) => response.text());
+    const html = await fetch(url, { next: { revalidate: EXTERNAL_ASSET_REVALIDATE_SECONDS } }).then((response) => response.text());
     const price = extractJsonValue(html, /"tradePrice":([\d.]+)/, (value) => {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : null;
@@ -256,6 +391,16 @@ async function getNaverEthereumPrice() {
       nativePrice: price,
       nativeCurrency: "KRW",
       tradedAt: buildNaverExchangeDateLabel(extractJsonValue(html, /"koreaTradedAt":"([^"]+)"/, (value) => value)),
+      changePct:
+        extractJsonValue(html, /"fluctuationsRatio":(-?[\d.]+)/, (value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }) ??
+        extractJsonValue(html, /"changeRate":(-?[\d.]+)/, (value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }) ??
+        undefined,
       quantityStep: 0.000001,
       quantityPrecision: 6,
       unitLabel: "ETH",
@@ -266,7 +411,7 @@ async function getNaverEthereumPrice() {
   }
 }
 
-async function getUsdCashAsset(exchangeRate: number, asOf: string | null) {
+async function getUsdCashAsset(exchangeRate: number, asOf: string | null, changePct?: number) {
   return {
     code: "ALT:USD",
     name: "달러",
@@ -276,6 +421,7 @@ async function getUsdCashAsset(exchangeRate: number, asOf: string | null) {
     nativePrice: 1,
     nativeCurrency: "USD",
     tradedAt: asOf,
+    changePct,
     quantityStep: 0.01,
     quantityPrecision: 2,
     unitLabel: "USD",
@@ -300,12 +446,8 @@ async function getUsStockUniverse(exchangeRate: number) {
   const results = await Promise.all(
     usTopAssets.map(async (item) => {
       try {
-        const csv = await fetch(`https://stooq.com/q/l/?s=${item.stooqTicker}&i=d`, {
-          next: { revalidate: 60 * 60 * 6 }
-        }).then((response) => response.text());
-        const [symbol, date, _time, open, high, low, close] = csv.trim().split(",");
-        const nativePrice = Number(close);
-        if (!symbol || !Number.isFinite(nativePrice)) {
+        const metrics = await getStooqDailyMetrics(item.stooqTicker);
+        if (!metrics) {
           return null;
         }
         return {
@@ -313,10 +455,11 @@ async function getUsStockUniverse(exchangeRate: number) {
           name: item.name,
           market: "미국주식",
           category: "us_stock" as const,
-          currentPrice: nativePrice * exchangeRate,
-          nativePrice,
+          currentPrice: metrics.nativePrice * exchangeRate,
+          nativePrice: metrics.nativePrice,
           nativeCurrency: "USD",
-          tradedAt: buildNaverExchangeDateLabel(date ?? null),
+          tradedAt: metrics.tradedAt,
+          changePct: metrics.changePct,
           quantityStep: 1,
           quantityPrecision: 0,
           unitLabel: "주",
@@ -342,7 +485,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     const exchangeRate = await getUsdKrwExchangeRate();
     const effectiveExchangeRate = exchangeRate.fallback ? snapshotExchangeRate : exchangeRate;
     const [usdCashAsset, goldAsset, bitcoinAsset, ethereumAsset, usStockUniverse] = await Promise.all([
-      getUsdCashAsset(effectiveExchangeRate.value, effectiveExchangeRate.asOf),
+      getUsdCashAsset(effectiveExchangeRate.value, effectiveExchangeRate.asOf, effectiveExchangeRate.changePct),
       getGoldEtfAsset(effectiveExchangeRate.value),
       getNaverBitcoinPrice(),
       getNaverEthereumPrice(),
@@ -358,7 +501,7 @@ export async function getDashboardData(): Promise<DashboardData> {
     ];
     const mergedExtraAssetUniverse = new Map(snapshotExtraAssets.map((item) => [item.code, item]));
     liveAssets.forEach((item) => {
-      mergedExtraAssetUniverse.set(item.code, item);
+      mergedExtraAssetUniverse.set(item.code, mergeExtraAsset(mergedExtraAssetUniverse.get(item.code), item));
     });
 
     return {
