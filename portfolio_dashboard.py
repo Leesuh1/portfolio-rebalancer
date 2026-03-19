@@ -346,6 +346,62 @@ def get_external_asset_snapshot() -> tuple[dict[str, object], list[dict[str, obj
     return exchange_rate, assets
 
 
+def load_existing_snapshot_payload() -> dict[str, object]:
+    snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    if not snapshot_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_external_asset_snapshot_with_fallback(
+    existing_payload: dict[str, object] | None = None,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    existing_payload = existing_payload or {}
+    snapshot_exchange_rate = existing_payload.get("exchangeRate")
+    snapshot_assets = existing_payload.get("extraAssetUniverse")
+
+    snapshot_exchange_by_code: dict[str, dict[str, object]] = {}
+    if isinstance(snapshot_assets, list):
+        for row in snapshot_assets:
+            if not isinstance(row, dict):
+                continue
+            code = row.get("code")
+            if isinstance(code, str):
+                snapshot_exchange_by_code[code] = row
+
+    exchange_rate, extra_assets = get_external_asset_snapshot()
+    if exchange_rate.get("fallback") and isinstance(snapshot_exchange_rate, dict):
+        exchange_rate = snapshot_exchange_rate
+
+    merged_assets: list[dict[str, object]] = []
+    for asset in extra_assets:
+        code = asset.get("code")
+        if not isinstance(code, str):
+            continue
+        snapshot_asset = snapshot_exchange_by_code.get(code)
+        current_price = asset.get("currentPrice")
+        if current_price is None and snapshot_asset is not None:
+            merged_assets.append(snapshot_asset)
+            continue
+        merged_assets.append(asset)
+
+    seen_codes = {
+        asset.get("code")
+        for asset in merged_assets
+        if isinstance(asset, dict) and isinstance(asset.get("code"), str)
+    }
+    for code, snapshot_asset in snapshot_exchange_by_code.items():
+        if code not in seen_codes:
+            merged_assets.append(snapshot_asset)
+
+    return exchange_rate, merged_assets
+
+
 def load_fnguide_html(gicode: str) -> BeautifulSoup:
     url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode={gicode}"
     response = request_with_retry(url)
@@ -839,14 +895,19 @@ def get_current_quote(gicode: str) -> dict[str, float]:
         daily_change_pct = float(blind_values[1]) if len(blind_values) >= 2 else np.nan
 
         previous_close = np.nan
+        exday_text = exday_node.get_text(" ", strip=True) if exday_node else ""
         if pd.notna(change_amount):
-            exday_text = exday_node.get_text(" ", strip=True) if exday_node else ""
             if "상승" in exday_text:
                 previous_close = current_price - change_amount
             elif "하락" in exday_text:
                 previous_close = current_price + change_amount
             else:
                 previous_close = current_price
+        if pd.notna(daily_change_pct):
+            if "하락" in exday_text:
+                daily_change_pct = -abs(daily_change_pct)
+            elif "상승" in exday_text:
+                daily_change_pct = abs(daily_change_pct)
 
         return {
             "현재가": current_price,
@@ -1470,26 +1531,107 @@ def load_existing_final_df() -> pd.DataFrame | None:
 
 
 def load_existing_snapshot_meta() -> dict[str, str | None]:
-    snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
-    if not snapshot_path.exists():
+    payload = load_existing_snapshot_payload()
+    if not payload:
         return {
             "priceUpdatedAt": None,
             "forecastUpdatedAt": None,
         }
-    try:
-        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        meta = payload.get("domesticDataMeta", {})
-        return {
-            "priceUpdatedAt": meta.get("priceUpdatedAt"),
-            "forecastUpdatedAt": meta.get("forecastUpdatedAt"),
-            "priceFallbackCount": meta.get("priceFallbackCount"),
-        }
-    except Exception:
+    meta = payload.get("domesticDataMeta", {})
+    if not isinstance(meta, dict):
         return {
             "priceUpdatedAt": None,
             "forecastUpdatedAt": None,
             "priceFallbackCount": None,
         }
+    return {
+        "priceUpdatedAt": meta.get("priceUpdatedAt"),
+        "forecastUpdatedAt": meta.get("forecastUpdatedAt"),
+        "priceFallbackCount": meta.get("priceFallbackCount"),
+    }
+
+
+def write_snapshot_payload(payload: dict[str, object]) -> Path:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    snapshot_path = OUTPUT_DIR / "dashboard_data.json"
+    WEB_PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+    snapshot_path.write_text(serialized, encoding="utf-8")
+    public_snapshot_path.write_text(serialized, encoding="utf-8")
+    return snapshot_path
+
+
+def collect_snapshot_domestic_codes(payload: dict[str, object]) -> list[str]:
+    codes: list[str] = []
+    seen: set[str] = set()
+
+    for collection_name in ["allRankings", "topRankings", "topPortfolio", "stockUniverse"]:
+        rows = payload.get(collection_name)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = row.get("종목코드")
+            if not isinstance(code, str) or not code.startswith("A") or code in seen:
+                continue
+            seen.add(code)
+            codes.append(code)
+
+    return codes
+
+
+def apply_snapshot_domestic_price_update(
+    payload: dict[str, object],
+    price_updated_at: str,
+) -> tuple[dict[str, object], int]:
+    updated_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    quote_map = load_existing_quote_snapshot()
+    fallback_codes: set[str] = set()
+
+    live_quote_map: dict[str, dict[str, float]] = {}
+    for code in collect_snapshot_domestic_codes(updated_payload):
+        live_quote = get_current_quote(code)
+        fallback_quote = quote_map.get(code)
+        use_fallback_quote = pd.isna(live_quote["현재가"]) and fallback_quote is not None
+        quote = fallback_quote if use_fallback_quote else live_quote
+        if use_fallback_quote:
+            fallback_codes.add(code)
+        live_quote_map[code] = {
+            "현재가": None if pd.isna(quote["현재가"]) else quote["현재가"],
+            "전일종가": None if pd.isna(quote["전일종가"]) else quote["전일종가"],
+            "전일종가대비등락률": None if pd.isna(quote["전일종가대비등락률"]) else quote["전일종가대비등락률"],
+        }
+
+    for collection_name in ["allRankings", "topRankings", "topPortfolio", "stockUniverse"]:
+        rows = updated_payload.get(collection_name)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = row.get("종목코드")
+            if not isinstance(code, str):
+                continue
+            quote = live_quote_map.get(code)
+            if quote is None:
+                continue
+            row["현재가"] = quote["현재가"]
+            if "전일종가" in row:
+                row["전일종가"] = quote["전일종가"]
+            if "전일종가대비등락률" in row:
+                row["전일종가대비등락률"] = quote["전일종가대비등락률"]
+
+    updated_payload["generatedAt"] = datetime.now().isoformat()
+    domestic_meta = updated_payload.get("domesticDataMeta")
+    if not isinstance(domestic_meta, dict):
+        domestic_meta = {}
+        updated_payload["domesticDataMeta"] = domestic_meta
+    domestic_meta["priceUpdatedAt"] = price_updated_at
+    domestic_meta["priceFallbackCount"] = len(fallback_codes)
+
+    return updated_payload, len(fallback_codes)
 
 
 def write_web_snapshot(
@@ -1505,11 +1647,10 @@ def write_web_snapshot(
     price_updated_at: str,
     forecast_updated_at: str | None,
     price_fallback_count: int = 0,
+    existing_payload: dict[str, object] | None = None,
+    refresh_external_assets: bool = True,
 ) -> Path:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    snapshot_path = OUTPUT_DIR / "dashboard_data.json"
-    WEB_PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    existing_payload = existing_payload or {}
     top10 = ranked_df.head(10).copy()
     selection_presets = get_selection_presets()
     market_code_name_map = get_market_code_name_map()
@@ -1536,7 +1677,15 @@ def write_web_snapshot(
         cleaned = cleaned.where(pd.notna(cleaned), None)
         return cleaned.to_dict(orient="records")
 
-    exchange_rate, extra_asset_universe = get_external_asset_snapshot()
+    if refresh_external_assets:
+        exchange_rate, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
+    else:
+        exchange_rate = existing_payload.get("exchangeRate")
+        extra_asset_universe = existing_payload.get("extraAssetUniverse")
+        if not isinstance(exchange_rate, dict):
+            exchange_rate, _ = get_external_asset_snapshot_with_fallback(existing_payload)
+        if not isinstance(extra_asset_universe, list):
+            _, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
 
     payload = {
         "generatedAt": datetime.now().isoformat(),
@@ -1602,36 +1751,49 @@ def write_web_snapshot(
             ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액", "현재가", "전일종가", "전일종가대비등락률"],
         ),
     }
-
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
-    snapshot_path.write_text(serialized, encoding="utf-8")
-    public_snapshot_path.write_text(serialized, encoding="utf-8")
-    return snapshot_path
+    return write_snapshot_payload(payload)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--price-only", action="store_true", help="Reuse the latest forecast snapshot and refresh current prices only.")
+    parser.add_argument("--domestic-price-only", action="store_true", help="Refresh domestic stock prices only and keep the latest external asset snapshot.")
+    parser.add_argument("--external-price-only", action="store_true", help="Refresh external asset prices only and keep the latest domestic snapshot.")
     args = parser.parse_args()
+    domestic_price_only = args.price_only or args.domestic_price_only
+
+    if domestic_price_only and args.external_price_only:
+        raise ValueError("--external-price-only cannot be combined with domestic price refresh options.")
 
     top_n = 10
     invest_amount = 20_000_000
     profile = "균형형"
     now_iso = datetime.now().isoformat()
+    existing_payload = load_existing_snapshot_payload()
 
-    if args.price_only:
-        final_df = load_existing_final_df()
-        snapshot_meta = load_existing_snapshot_meta()
-        if final_df is None:
-            final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
-            forecast_updated_at = now_iso
-        else:
-            incomplete_list = []
-            incomplete_reasons = {}
-            forecast_updated_at = snapshot_meta.get("forecastUpdatedAt")
-    else:
-        final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
-        forecast_updated_at = now_iso
+    if args.external_price_only:
+        if not existing_payload:
+            raise FileNotFoundError("기존 dashboard_data.json이 없어 외부자산만 갱신할 수 없습니다.")
+
+        existing_payload["generatedAt"] = now_iso
+        exchange_rate, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
+        existing_payload["exchangeRate"] = exchange_rate
+        existing_payload["extraAssetUniverse"] = extra_asset_universe
+        snapshot_path = write_snapshot_payload(existing_payload)
+        print(f"external asset snapshot written to: {snapshot_path}")
+        return
+
+    if domestic_price_only:
+        if not existing_payload:
+            raise FileNotFoundError("기존 dashboard_data.json이 없어 국내 가격만 갱신할 수 없습니다.")
+        updated_payload, price_fallback_count = apply_snapshot_domestic_price_update(existing_payload, now_iso)
+        snapshot_path = write_snapshot_payload(updated_payload)
+        print(f"domestic price snapshot written to: {snapshot_path}")
+        print(f"price fallback count: {price_fallback_count}")
+        return
+
+    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
+    forecast_updated_at = now_iso
 
     print(f"incomplete stocks: {incomplete_list}")
 
@@ -1670,6 +1832,8 @@ def main() -> None:
         price_updated_at=now_iso,
         forecast_updated_at=forecast_updated_at,
         price_fallback_count=price_fallback_count,
+        existing_payload=existing_payload,
+        refresh_external_assets=not domestic_price_only,
     )
     dashboard_path = write_dashboard(ranked_df, portfolio_df, bar_fig, bubble_fig, heatmap_fig)
 
