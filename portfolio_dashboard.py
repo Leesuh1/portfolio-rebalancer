@@ -877,6 +877,27 @@ def get_market_cap(gicode: str) -> float:
         return np.nan
 
 
+def normalize_quote_values(
+    current_price: float | None,
+    previous_close: float | None,
+    daily_change_pct: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    if current_price is None or previous_close is None or daily_change_pct is None:
+        return current_price, previous_close, daily_change_pct
+
+    if pd.isna(current_price) or pd.isna(previous_close) or pd.isna(daily_change_pct):
+        return current_price, previous_close, daily_change_pct
+
+    if current_price < previous_close:
+        daily_change_pct = -abs(daily_change_pct)
+    elif current_price > previous_close:
+        daily_change_pct = abs(daily_change_pct)
+    else:
+        daily_change_pct = 0.0
+
+    return current_price, previous_close, daily_change_pct
+
+
 def get_current_quote(gicode: str) -> dict[str, float]:
     ticker = gicode.replace("A", "")
     url = f"https://finance.naver.com/item/main.naver?code={ticker}"
@@ -903,11 +924,9 @@ def get_current_quote(gicode: str) -> dict[str, float]:
                 previous_close = current_price + change_amount
             else:
                 previous_close = current_price
-        if pd.notna(daily_change_pct):
-            if "하락" in exday_text:
-                daily_change_pct = -abs(daily_change_pct)
-            elif "상승" in exday_text:
-                daily_change_pct = abs(daily_change_pct)
+        current_price, previous_close, daily_change_pct = normalize_quote_values(
+            current_price, previous_close, daily_change_pct
+        )
 
         return {
             "현재가": current_price,
@@ -1556,6 +1575,22 @@ def write_snapshot_payload(payload: dict[str, object]) -> Path:
     snapshot_path = OUTPUT_DIR / "dashboard_data.json"
     WEB_PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
     public_snapshot_path = WEB_PUBLIC_DATA_DIR / "dashboard_data.json"
+    for collection_name in ["allRankings", "topRankings", "stockUniverse"]:
+        rows = payload.get(collection_name)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            current_price, previous_close, daily_change_pct = normalize_quote_values(
+                row.get("현재가"),
+                row.get("전일종가"),
+                row.get("전일종가대비등락률"),
+            )
+            row["현재가"] = current_price
+            row["전일종가"] = previous_close
+            row["전일종가대비등락률"] = daily_change_pct
+
     serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
     snapshot_path.write_text(serialized, encoding="utf-8")
     public_snapshot_path.write_text(serialized, encoding="utf-8")
