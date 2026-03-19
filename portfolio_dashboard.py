@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from io import StringIO
@@ -1617,27 +1618,55 @@ def collect_snapshot_domestic_codes(payload: dict[str, object]) -> list[str]:
     return codes
 
 
+def fetch_snapshot_domestic_quotes(
+    codes: list[str],
+    existing_quote_map: dict[str, dict[str, float]],
+    max_workers: int = 12,
+) -> tuple[dict[str, dict[str, float | None]], int]:
+    live_quote_map: dict[str, dict[str, float | None]] = {}
+    fallback_codes: set[str] = set()
+
+    def fetch_one(code: str) -> tuple[str, dict[str, float | None], bool]:
+        live_quote = get_current_quote(code)
+        fallback_quote = existing_quote_map.get(code)
+        use_fallback_quote = pd.isna(live_quote["현재가"]) and fallback_quote is not None
+        quote = fallback_quote if use_fallback_quote else live_quote
+        current_price, previous_close, daily_change_pct = normalize_quote_values(
+            quote.get("현재가"),
+            quote.get("전일종가"),
+            quote.get("전일종가대비등락률"),
+        )
+        return (
+            code,
+            {
+                "현재가": None if pd.isna(current_price) else current_price,
+                "전일종가": None if pd.isna(previous_close) else previous_close,
+                "전일종가대비등락률": None if pd.isna(daily_change_pct) else daily_change_pct,
+            },
+            use_fallback_quote,
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, code): code for code in codes}
+        for future in as_completed(futures):
+            code, quote, used_fallback = future.result()
+            live_quote_map[code] = quote
+            if used_fallback:
+                fallback_codes.add(code)
+
+    return live_quote_map, len(fallback_codes)
+
+
 def apply_snapshot_domestic_price_update(
     payload: dict[str, object],
     price_updated_at: str,
 ) -> tuple[dict[str, object], int]:
     updated_payload = json.loads(json.dumps(payload, ensure_ascii=False))
     quote_map = load_existing_quote_snapshot()
-    fallback_codes: set[str] = set()
-
-    live_quote_map: dict[str, dict[str, float]] = {}
-    for code in collect_snapshot_domestic_codes(updated_payload):
-        live_quote = get_current_quote(code)
-        fallback_quote = quote_map.get(code)
-        use_fallback_quote = pd.isna(live_quote["현재가"]) and fallback_quote is not None
-        quote = fallback_quote if use_fallback_quote else live_quote
-        if use_fallback_quote:
-            fallback_codes.add(code)
-        live_quote_map[code] = {
-            "현재가": None if pd.isna(quote["현재가"]) else quote["현재가"],
-            "전일종가": None if pd.isna(quote["전일종가"]) else quote["전일종가"],
-            "전일종가대비등락률": None if pd.isna(quote["전일종가대비등락률"]) else quote["전일종가대비등락률"],
-        }
+    live_quote_map, fallback_count = fetch_snapshot_domestic_quotes(
+        collect_snapshot_domestic_codes(updated_payload),
+        quote_map,
+    )
 
     for collection_name in ["allRankings", "topRankings", "topPortfolio", "stockUniverse"]:
         rows = updated_payload.get(collection_name)
@@ -1664,9 +1693,9 @@ def apply_snapshot_domestic_price_update(
         domestic_meta = {}
         updated_payload["domesticDataMeta"] = domestic_meta
     domestic_meta["priceUpdatedAt"] = price_updated_at
-    domestic_meta["priceFallbackCount"] = len(fallback_codes)
+    domestic_meta["priceFallbackCount"] = fallback_count
 
-    return updated_payload, len(fallback_codes)
+    return updated_payload, fallback_count
 
 
 def write_web_snapshot(
