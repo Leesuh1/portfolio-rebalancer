@@ -844,7 +844,9 @@ export function DashboardApp({ data }: Props) {
     setWorkspaceMode("rebalance");
   }, [data.investAmount, data.profile, defaultSelection]);
   const activeWeights = profileWeights[profile as keyof typeof profileWeights] ?? profileWeights.밸런스형;
-  const exchangeRate = clampExchangeRate(data.exchangeRate?.value ?? 1400);
+  const exchangeRate = Number.isFinite(Number(data.exchangeRate?.value))
+    ? Math.round(Number(data.exchangeRate?.value))
+    : 1400;
   const exchangeRateUpdatedAt = data.exchangeRate?.updatedAt;
   const exchangeRateSource = data.exchangeRate?.source ?? "네이버 증권";
   const exchangeRateFallback = Boolean(data.exchangeRate?.fallback);
