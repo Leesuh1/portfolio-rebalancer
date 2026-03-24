@@ -79,6 +79,7 @@ type StorageEnvelope = {
 
 type UiStateEnvelope = {
   workspaceMode?: WorkspaceMode;
+  lastAuthUserId?: string | null;
 };
 
 type VisiblePortfolioRow = {
@@ -254,6 +255,26 @@ function formatOptionalPercent(value: number | null | undefined) {
 function formatDateTimeLabel(value: string | null | undefined) {
   if (!value) {
     return "-";
+  }
+  const compactDate = value.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compactDate) {
+    return `${compactDate[1]}-${compactDate[2]}-${compactDate[3]}`;
+  }
+  const parseableDate = new Date(value);
+  if (!Number.isNaN(parseableDate.getTime()) && (value.includes("T") || /[+-]\d{2}:\d{2}$/.test(value) || value.endsWith("Z"))) {
+    return new Intl.DateTimeFormat("ko-KR", {
+      timeZone: "Asia/Seoul",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+      .format(parseableDate)
+      .replace(/\. /g, "-")
+      .replace(/\.$/, "")
+      .replace(", ", " ");
   }
   const normalized = value.replace("T", " ");
   const isoLike = normalized.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/);
@@ -818,6 +839,7 @@ export function DashboardApp({ data }: Props) {
   const uiStateRestoredRef = useRef(false);
   const scrollRestoredRef = useRef(false);
   const previousAuthUserIdRef = useRef<string | null>(null);
+  const signedInEventRef = useRef(false);
   const [rebalanceComparison, setRebalanceComparison] = useState<{
     before: SavedProfile | null;
     after: SavedProfile | null;
@@ -852,6 +874,7 @@ export function DashboardApp({ data }: Props) {
   const exchangeRateFallback = Boolean(data.exchangeRate?.fallback);
   const domesticPriceUpdatedAt = data.domesticDataMeta?.priceUpdatedAt ?? data.generatedAt;
   const domesticForecastUpdatedAt = data.domesticDataMeta?.forecastUpdatedAt ?? data.generatedAt;
+  const externalPriceUpdatedAt = data.externalDataMeta?.priceUpdatedAt ?? data.generatedAt;
   const domesticPriceFallbackCount = Number(data.domesticDataMeta?.priceFallbackCount ?? 0);
   const domesticPriceFallbackNotice =
     domesticPriceFallbackCount > 0 ? `일부 종목은 이전 값 포함 (${domesticPriceFallbackCount}개)` : null;
@@ -2295,7 +2318,13 @@ export function DashboardApp({ data }: Props) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session?.user) {
+        signedInEventRef.current = true;
+      }
+      if (!session?.user) {
+        signedInEventRef.current = false;
+      }
       setAuthUser(session?.user ?? null);
       setAuthReady(true);
       if (!session?.user) {
@@ -2313,6 +2342,9 @@ export function DashboardApp({ data }: Props) {
     if (typeof window === "undefined" || uiStateRestoredRef.current) {
       return;
     }
+    if (supabaseEnabled && !authReady) {
+      return;
+    }
 
     try {
       const raw = window.localStorage.getItem(uiStateKey);
@@ -2321,22 +2353,34 @@ export function DashboardApp({ data }: Props) {
       }
 
       const parsed = JSON.parse(raw) as UiStateEnvelope;
-      if ((parsed.workspaceMode === "update" || parsed.workspaceMode === "rebalance") && (parsed.workspaceMode === "rebalance" || canManagePortfolio)) {
-        setWorkspaceMode(parsed.workspaceMode);
+      const isValidWorkspaceMode = parsed.workspaceMode === "update" || parsed.workspaceMode === "rebalance";
+      const matchesCurrentAuthUser = (parsed.lastAuthUserId ?? null) === (authUser?.id ?? null);
+      const restoredWorkspaceMode = isValidWorkspaceMode ? parsed.workspaceMode : null;
+
+      if (
+        restoredWorkspaceMode &&
+        (restoredWorkspaceMode === "update"
+          ? canManagePortfolio
+          : !authUser || matchesCurrentAuthUser)
+      ) {
+        setWorkspaceMode(restoredWorkspaceMode);
       }
     } catch {
       // Ignore invalid UI state and continue with defaults.
     } finally {
       uiStateRestoredRef.current = true;
     }
-  }, [canManagePortfolio]);
+  }, [authReady, authUser, canManagePortfolio, supabaseEnabled]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !uiStateRestoredRef.current) {
       return;
     }
-    window.localStorage.setItem(uiStateKey, JSON.stringify({ workspaceMode } satisfies UiStateEnvelope));
-  }, [workspaceMode]);
+    window.localStorage.setItem(
+      uiStateKey,
+      JSON.stringify({ workspaceMode, lastAuthUserId: authUser?.id ?? null } satisfies UiStateEnvelope)
+    );
+  }, [authUser, workspaceMode]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !storageReady || !authReady || scrollRestoredRef.current) {
@@ -2536,14 +2580,37 @@ export function DashboardApp({ data }: Props) {
       return;
     }
 
+    const rawUiState = window.localStorage.getItem(uiStateKey);
+    let hasStoredWorkspaceForCurrentUser = false;
+    if (rawUiState) {
+      try {
+        const parsed = JSON.parse(rawUiState) as UiStateEnvelope;
+        hasStoredWorkspaceForCurrentUser = (parsed.lastAuthUserId ?? null) === currentAuthUserId;
+      } catch {
+        hasStoredWorkspaceForCurrentUser = false;
+      }
+    }
+
     const hasCompletedFirstLogin = window.localStorage.getItem(firstLoginKey) === "done";
+    const justSignedIn = signedInEventRef.current;
+    if (justSignedIn) {
+      signedInEventRef.current = false;
+      if (!hasCompletedFirstLogin) {
+        window.localStorage.setItem(firstLoginKey, "done");
+      }
+      if (workspaceMode !== "update") {
+        setWorkspaceMode("update");
+      }
+      return;
+    }
+
     if (!hasCompletedFirstLogin) {
       window.localStorage.setItem(firstLoginKey, "done");
       setWorkspaceMode("update");
       return;
     }
 
-    if (workspaceMode !== "update" && !window.localStorage.getItem(uiStateKey)) {
+    if (workspaceMode !== "update" && !hasStoredWorkspaceForCurrentUser) {
       setWorkspaceMode("update");
     }
   }, [authReady, authUser, supabaseEnabled, workspaceMode]);
@@ -3772,6 +3839,7 @@ export function DashboardApp({ data }: Props) {
         <div className="section-meta-inline">
           <span>국내주식 현재가 업데이트 {formatDateTimeLabel(domesticPriceUpdatedAt)}</span>
           <span>실적전망치 기준 업데이트 {formatDateTimeLabel(domesticForecastUpdatedAt)}</span>
+          <span>해외 자산 가격 업데이트 {formatDateTimeLabel(externalPriceUpdatedAt)}</span>
           {domesticPriceFallbackNotice ? <span>{domesticPriceFallbackNotice}</span> : null}
         </div>
 
@@ -4098,6 +4166,7 @@ export function DashboardApp({ data }: Props) {
               <div className="section-meta-inline balance-meta-inline">
                 <span>국내주식 현재가 업데이트 {formatDateTimeLabel(domesticPriceUpdatedAt)}</span>
                 <span>실적전망치 기준 업데이트 {formatDateTimeLabel(domesticForecastUpdatedAt)}</span>
+                <span>해외 자산 가격 업데이트 {formatDateTimeLabel(externalPriceUpdatedAt)}</span>
                 {domesticPriceFallbackNotice ? <span>{domesticPriceFallbackNotice}</span> : null}
                 {baselineMissingPriceCount > 0 ? <span>가격 미확인 자산 {baselineMissingPriceCount}개는 평가 합계에서 제외</span> : null}
               </div>

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,7 @@ WEB_PUBLIC_DATA_DIR = BASE_DIR / "web" / "public" / "data"
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 REQUEST_TIMEOUT = 20
 REQUEST_RETRIES = 4
+KST = ZoneInfo("Asia/Seoul")
 ETF_NAME_KEYWORDS = (
     "ETF",
     "ETN",
@@ -94,21 +96,18 @@ DEFAULT_TICKERS = [
 PROFILE_WEIGHTS = {
     "안정형": {
         "성장": 0.20,
-        "가치": 0.30,
-        "ROE": 0.20,
-        "순현금": 0.30,
+        "가치": 0.50,
+        "ROE": 0.30,
     },
     "균형형": {
-        "성장": 0.25,
-        "가치": 0.25,
-        "ROE": 0.25,
-        "순현금": 0.25,
+        "성장": 0.40,
+        "가치": 0.40,
+        "ROE": 0.20,
     },
     "공격형": {
-        "성장": 0.35,
-        "가치": 0.20,
-        "ROE": 0.30,
-        "순현금": 0.15,
+        "성장": 0.60,
+        "가치": 0.30,
+        "ROE": 0.10,
     },
 }
 
@@ -126,6 +125,14 @@ US_TOP_ASSETS = [
 ]
 
 
+def now_kst() -> datetime:
+    return datetime.now(KST)
+
+
+def now_kst_iso() -> str:
+    return now_kst().isoformat(timespec="seconds")
+
+
 def build_external_date_label(raw_label: str | None) -> str | None:
     if not raw_label:
         return None
@@ -136,7 +143,7 @@ def build_external_date_label(raw_label: str | None) -> str | None:
 
     month_day_match = re.search(r"(\d{2})\.(\d{2})\.", raw_label)
     if month_day_match:
-        now = datetime.now()
+        now = now_kst()
         return f"{now.year}-{month_day_match.group(1)}-{month_day_match.group(2)}"
 
     return raw_label.strip()
@@ -152,7 +159,7 @@ def build_external_datetime_label(raw_label: str | None) -> str | None:
 
     month_day_match = re.search(r"(\d{2})\.(\d{2})\.\s+(\d{2}:\d{2})", raw_label)
     if month_day_match:
-        now = datetime.now()
+        now = now_kst()
         return f"{now.year}-{month_day_match.group(1)}-{month_day_match.group(2)} {month_day_match.group(3)}"
 
     return raw_label.strip()
@@ -436,8 +443,23 @@ def normalize_financial_item(item: str) -> str:
     return item
 
 
+def get_index_or_none(values: list[float | None], index: int) -> float | None:
+    return values[index] if 0 <= index < len(values) else None
+
+
+def get_first_non_null(series: pd.Series | None, default: float | str | None = np.nan):
+    if series is None:
+        return default
+    cleaned = series.dropna()
+    if cleaned.empty:
+        return default
+    return cleaned.iloc[0]
+
+
 def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tuple[pd.DataFrame, int]:
     tables = html.find_all("table", class_="us_table_ty1 h_fix zigbg_no")
+    if len(tables) <= 5:
+        raise ValueError("연간 재무 테이블 부족")
     table_y = tables[5]
 
     header_rows = table_y.find_all("tr")[:2]
@@ -467,12 +489,20 @@ def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tup
             values.append(parse_numeric_text(text))
         raw_data[normalized_item] = values
 
-    this_year = int(
-        html.find("tr", class_="td_gapcolor2")
-        .find("span", class_="txt_acd")
-        .get_text()
-        .split("/")[0]
-    )
+    base_year_row = html.find("tr", class_="td_gapcolor2")
+    base_year_text = None
+    if base_year_row is not None:
+        base_year_span = base_year_row.find("span", class_="txt_acd")
+        if base_year_span is not None:
+            base_year_text = base_year_span.get_text(strip=True)
+
+    base_year_match = re.search(r"(\d{4})", base_year_text or "")
+    if base_year_match:
+        this_year = int(base_year_match.group(1))
+    elif year_labels:
+        this_year = year_labels[0]
+    else:
+        this_year = now_kst().year
 
     year_anchor_key = next((key for key in ["매출액", "영업이익", "당기순이익"] if key in raw_data), None)
     if year_anchor_key is None:
@@ -481,16 +511,21 @@ def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tup
     years = year_labels[: len(raw_data[year_anchor_key])]
     if not years:
         years = list(range(this_year - 5, this_year - 5 + len(raw_data[year_anchor_key])))
+
+    revenue_values = raw_data.get("매출액", [None] * len(years))
+    operating_values = raw_data.get("영업이익", [None] * len(years))
+    reported_operating_values = raw_data.get("영업이익(발표기준)", operating_values)
+    net_income_values = raw_data.get("당기순이익", [None] * len(years))
     operating_profit = [
-        raw_data["영업이익(발표기준)"][i] if year < this_year else raw_data["영업이익"][i]
+        get_index_or_none(reported_operating_values, i) if year < this_year else get_index_or_none(operating_values, i)
         for i, year in enumerate(years)
     ]
 
     yearly_data: dict[str, list[float | None] | list[int]] = {
         "연도": years,
-        "매출액": raw_data["매출액"],
+        "매출액": revenue_values[: len(years)],
         "영업이익": operating_profit,
-        "당기순이익": raw_data["당기순이익"],
+        "당기순이익": net_income_values[: len(years)],
     }
     if "ROE" in raw_data:
         yearly_data["ROE"] = raw_data["ROE"][: len(years)]
@@ -509,9 +544,9 @@ def get_profile_weight_map(profile: str) -> dict[str, float]:
 
 def get_reference_date() -> str:
     if stock is None:
-        return datetime.now().strftime("%Y%m%d")
+        return now_kst().strftime("%Y%m%d")
 
-    today = datetime.now()
+    today = now_kst()
     try:
         response = request_with_retry("https://www.google.com", method="head", timeout=5)
         if response is not None:
@@ -543,7 +578,7 @@ def get_reference_date() -> str:
             except Exception:
                 continue
 
-    return datetime.now().strftime("%Y%m%d")
+    return now_kst().strftime("%Y%m%d")
 
 
 def get_market_universe(market: str) -> pd.DataFrame:
@@ -794,7 +829,7 @@ def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, lis
     incomplete_stocks: list[str] = []
     incomplete_reasons: dict[str, str] = {}
     all_results: list[pd.DataFrame] = []
-    calendar_year = datetime.now().year
+    calendar_year = now_kst().year
 
     for gicode in gicodes or get_top30_gicodes():
         try:
@@ -1032,7 +1067,7 @@ def calc_per(market_cap: float, profit: float) -> float:
 
 def build_result_df(final_df: pd.DataFrame, existing_quote_map: dict[str, dict[str, float]] | None = None) -> pd.DataFrame:
     result_rows: list[dict[str, float | str]] = []
-    calendar_year = datetime.now().year
+    calendar_year = now_kst().year
     existing_quote_map = existing_quote_map or {}
 
     for gicode in final_df["종목코드"].unique():
@@ -1044,12 +1079,12 @@ def build_result_df(final_df: pd.DataFrame, existing_quote_map: dict[str, dict[s
 
         stock_name = stock_df["종목명"].iloc[0]
         confirmed = confirmed_row.iloc[0]
-        operating_forecast = stock_df["적용 영업이익(E)"].dropna().iloc[0] if "적용 영업이익(E)" in stock_df.columns else np.nan
-        net_forecast = stock_df["적용 당기순이익(E)"].dropna().iloc[0] if "적용 당기순이익(E)" in stock_df.columns else np.nan
-        forecast_roe = stock_df["적용 ROE(E)"].dropna().iloc[0] if "적용 ROE(E)" in stock_df.columns and stock_df["적용 ROE(E)"].notna().any() else np.nan
-        operating_target_year = int(stock_df["적용 영업이익 기준연도"].dropna().iloc[0]) if "적용 영업이익 기준연도" in stock_df.columns else calendar_year + 2
-        net_target_year = int(stock_df["적용 당기순이익 기준연도"].dropna().iloc[0]) if "적용 당기순이익 기준연도" in stock_df.columns else calendar_year + 2
-        roe_target_year = int(stock_df["적용 ROE 기준연도"].dropna().iloc[0]) if "적용 ROE 기준연도" in stock_df.columns and stock_df["적용 ROE 기준연도"].notna().any() else calendar_year - 1
+        operating_forecast = get_first_non_null(stock_df["적용 영업이익(E)"] if "적용 영업이익(E)" in stock_df.columns else None, np.nan)
+        net_forecast = get_first_non_null(stock_df["적용 당기순이익(E)"] if "적용 당기순이익(E)" in stock_df.columns else None, np.nan)
+        forecast_roe = get_first_non_null(stock_df["적용 ROE(E)"] if "적용 ROE(E)" in stock_df.columns else None, np.nan)
+        operating_target_year = int(get_first_non_null(stock_df["적용 영업이익 기준연도"] if "적용 영업이익 기준연도" in stock_df.columns else None, calendar_year + 2))
+        net_target_year = int(get_first_non_null(stock_df["적용 당기순이익 기준연도"] if "적용 당기순이익 기준연도" in stock_df.columns else None, calendar_year + 2))
+        roe_target_year = int(get_first_non_null(stock_df["적용 ROE 기준연도"] if "적용 ROE 기준연도" in stock_df.columns else None, calendar_year - 1))
         operating_growth_years = max(1, operating_target_year - (calendar_year - 1))
         net_growth_years = max(1, net_target_year - (calendar_year - 1))
         market_cap = get_market_cap(gicode)
@@ -1058,7 +1093,7 @@ def build_result_df(final_df: pd.DataFrame, existing_quote_map: dict[str, dict[s
         use_fallback_quote = pd.isna(live_quote["현재가"]) and fallback_quote is not None
         quote = fallback_quote if use_fallback_quote else live_quote
         quality_metrics = get_quality_metrics(gicode)
-        roe_source = stock_df["적용 ROE 소스"].dropna().iloc[0] if "적용 ROE 소스" in stock_df.columns and stock_df["적용 ROE 소스"].notna().any() else "없음"
+        roe_source = get_first_non_null(stock_df["적용 ROE 소스"] if "적용 ROE 소스" in stock_df.columns else None, "없음")
 
         result_rows.append(
             {
@@ -1124,8 +1159,7 @@ def build_ranked_df(result_df: pd.DataFrame, profile: str = "균형형") -> pd.D
     df["기여_성장"] = weights["성장"] * df["성장점수"]
     df["기여_가치"] = weights["가치"] * df["저평가점수"]
     df["기여_ROE"] = weights["ROE"] * df["ROE점수"]
-    df["기여_순현금"] = weights["순현금"] * df["순현금점수"]
-    df["종합점수"] = df["기여_성장"] + df["기여_가치"] + df["기여_ROE"] + df["기여_순현금"]
+    df["종합점수"] = df["기여_성장"] + df["기여_가치"] + df["기여_ROE"]
     df["종합점수_100"] = df["종합점수"] * 100
     df = df.sort_values("종합점수_100", ascending=False).reset_index(drop=True)
     df["랭킹"] = range(1, len(df) + 1)
@@ -1350,8 +1384,8 @@ def build_bubble_figure(df: pd.DataFrame) -> go.Figure:
 def build_heatmap_figure(df: pd.DataFrame) -> go.Figure:
     top10 = df.sort_values("종합점수", ascending=False).head(10)
     heatmap_df = (
-        top10[["종목명", "성장점수", "저평가점수", "ROE점수", "순현금점수"]]
-        .rename(columns={"성장점수": "성장", "저평가점수": "가치(PER)", "ROE점수": "ROE", "순현금점수": "순현금"})
+        top10[["종목명", "성장점수", "저평가점수", "ROE점수"]]
+        .rename(columns={"성장점수": "성장", "저평가점수": "가치(PER)", "ROE점수": "ROE"})
         .set_index("종목명")
     )
     z = heatmap_df.values.astype(float)
@@ -1390,7 +1424,7 @@ def build_portfolio_df(df: pd.DataFrame, top_n: int, invest_amount: int) -> pd.D
     portfolio_df["투자금액"] = (portfolio_df["비중"] * invest_amount).round(0)
     portfolio_df["비중(%)"] = (portfolio_df["비중"] * 100).round(2)
     return portfolio_df[
-        ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE", "순현금점수"]
+        ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE"]
     ]
 
 
@@ -1413,7 +1447,6 @@ def write_dashboard(
             "성장점수",
             "저평가점수",
             "ROE점수",
-            "순현금점수",
             "작년 영업이익",
             "작년 당기순이익",
             "내후년 영업이익(E)",
@@ -1556,18 +1589,22 @@ def load_existing_snapshot_meta() -> dict[str, str | None]:
         return {
             "priceUpdatedAt": None,
             "forecastUpdatedAt": None,
+            "externalPriceUpdatedAt": None,
         }
     meta = payload.get("domesticDataMeta", {})
+    external_meta = payload.get("externalDataMeta", {})
     if not isinstance(meta, dict):
         return {
             "priceUpdatedAt": None,
             "forecastUpdatedAt": None,
             "priceFallbackCount": None,
+            "externalPriceUpdatedAt": None,
         }
     return {
         "priceUpdatedAt": meta.get("priceUpdatedAt"),
         "forecastUpdatedAt": meta.get("forecastUpdatedAt"),
         "priceFallbackCount": meta.get("priceFallbackCount"),
+        "externalPriceUpdatedAt": external_meta.get("priceUpdatedAt") if isinstance(external_meta, dict) else None,
     }
 
 
@@ -1687,7 +1724,7 @@ def apply_snapshot_domestic_price_update(
             if "전일종가대비등락률" in row:
                 row["전일종가대비등락률"] = quote["전일종가대비등락률"]
 
-    updated_payload["generatedAt"] = datetime.now().isoformat()
+    updated_payload["generatedAt"] = now_kst_iso()
     domestic_meta = updated_payload.get("domesticDataMeta")
     if not isinstance(domestic_meta, dict):
         domestic_meta = {}
@@ -1743,20 +1780,30 @@ def write_web_snapshot(
 
     if refresh_external_assets:
         exchange_rate, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
+        external_price_updated_at = now_kst_iso()
     else:
         exchange_rate = existing_payload.get("exchangeRate")
         extra_asset_universe = existing_payload.get("extraAssetUniverse")
+        external_meta = existing_payload.get("externalDataMeta")
+        external_price_updated_at = (
+            external_meta.get("priceUpdatedAt")
+            if isinstance(external_meta, dict)
+            else None
+        )
         if not isinstance(exchange_rate, dict):
             exchange_rate, _ = get_external_asset_snapshot_with_fallback(existing_payload)
         if not isinstance(extra_asset_universe, list):
             _, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
 
     payload = {
-        "generatedAt": datetime.now().isoformat(),
+        "generatedAt": now_kst_iso(),
         "domesticDataMeta": {
             "priceUpdatedAt": price_updated_at,
             "forecastUpdatedAt": forecast_updated_at,
             "priceFallbackCount": price_fallback_count,
+        },
+        "externalDataMeta": {
+            "priceUpdatedAt": external_price_updated_at,
         },
         "exchangeRate": exchange_rate,
         "extraAssetUniverse": extra_asset_universe,
@@ -1774,11 +1821,11 @@ def write_web_snapshot(
         },
         "topPortfolio": sanitize_records(
             portfolio_df,
-            ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE", "순현금점수"],
+            ["종목코드", "종목명", "현재가", "종합점수", "비중(%)", "투자금액", "투자스타일", "ROE"],
         ),
         "topRankings": sanitize_records(
             top10,
-            ["종목코드", "랭킹", "종목명", "현재가", "전일종가", "전일종가대비등락률", "종합점수_100", "성장점수", "저평가점수", "ROE점수", "순현금점수", "투자스타일"],
+            ["종목코드", "랭킹", "종목명", "현재가", "전일종가", "전일종가대비등락률", "종합점수_100", "성장점수", "저평가점수", "ROE점수", "투자스타일"],
         ),
         "allRankings": sanitize_records(
             ranked_df,
@@ -1793,7 +1840,6 @@ def write_web_snapshot(
                 "성장점수",
                 "저평가점수",
                 "ROE점수",
-                "순현금점수",
                 "투자스타일",
                 "작년 영업이익",
                 "작년 당기순이익",
@@ -1815,6 +1861,11 @@ def write_web_snapshot(
             ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액", "현재가", "전일종가", "전일종가대비등락률"],
         ),
     }
+    existing_external_meta = existing_payload.get("externalDataMeta")
+    if external_price_updated_at is None and isinstance(existing_external_meta, dict):
+        payload["externalDataMeta"] = {
+            "priceUpdatedAt": existing_external_meta.get("priceUpdatedAt"),
+        }
     return write_snapshot_payload(payload)
 
 
@@ -1832,7 +1883,7 @@ def main() -> None:
     top_n = 10
     invest_amount = 20_000_000
     profile = "균형형"
-    now_iso = datetime.now().isoformat()
+    now_iso = now_kst_iso()
     existing_payload = load_existing_snapshot_payload()
 
     if args.external_price_only:
@@ -1840,6 +1891,11 @@ def main() -> None:
             raise FileNotFoundError("기존 dashboard_data.json이 없어 외부자산만 갱신할 수 없습니다.")
 
         existing_payload["generatedAt"] = now_iso
+        external_meta = existing_payload.get("externalDataMeta")
+        if not isinstance(external_meta, dict):
+            external_meta = {}
+            existing_payload["externalDataMeta"] = external_meta
+        external_meta["priceUpdatedAt"] = now_iso
         exchange_rate, extra_asset_universe = get_external_asset_snapshot_with_fallback(existing_payload)
         existing_payload["exchangeRate"] = exchange_rate
         existing_payload["extraAssetUniverse"] = extra_asset_universe

@@ -40,7 +40,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add web/public/data/
-          git add outputs/financials_raw.csv
+          git add -f outputs/financials_raw.csv
           git commit -m "Refresh portfolio data snapshot"
           git push
 

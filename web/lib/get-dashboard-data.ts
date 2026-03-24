@@ -40,6 +40,9 @@ export type DashboardData = {
     forecastUpdatedAt: string | null;
     priceFallbackCount?: number | null;
   };
+  externalDataMeta?: {
+    priceUpdatedAt: string | null;
+  };
   exchangeRate: {
     value: number;
     asOf: string | null;
@@ -100,6 +103,9 @@ const fallbackData: DashboardData = {
     priceUpdatedAt: null,
     forecastUpdatedAt: null,
     priceFallbackCount: 0
+  },
+  externalDataMeta: {
+    priceUpdatedAt: null
   },
   exchangeRate: {
     value: 1400,
