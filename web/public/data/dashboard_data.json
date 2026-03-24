@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-25T07:29:37+09:00",
+  "generatedAt": "2026-03-25T08:02:28+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-03-24T16:17:51+09:00",
     "forecastUpdatedAt": "2026-03-18T17:47:17.387166",
@@ -49,11 +49,11 @@
       "name": "비트코인",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 104975000.0,
-      "nativePrice": 104975000.0,
+      "currentPrice": 104984000.0,
+      "nativePrice": 104984000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-03-25",
-      "changePct": -0.26,
+      "changePct": -0.25,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "BTC",
@@ -64,11 +64,11 @@
       "name": "이더리움",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 3207000.0,
-      "nativePrice": 3207000.0,
+      "currentPrice": 3201000.0,
+      "nativePrice": 3201000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-03-25",
-      "changePct": 0.25,
+      "changePct": 0.06,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "ETH",
@@ -124,11 +124,11 @@
       "name": "Amazon",
       "market": "미국주식",
       "category": "us_stock",
-      "currentPrice": 310283.19,
-      "nativePrice": 207.27,
+      "currentPrice": 310298.16,
+      "nativePrice": 207.28,
       "nativeCurrency": "USD",
       "tradedAt": "20260324",
-      "changePct": -1.3657561625582832,
+      "changePct": -1.360997430284565,
       "quantityStep": 1,
       "quantityPrecision": 0,
       "unitLabel": "주",
@@ -40407,6 +40407,6 @@
     }
   ],
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-03-25T07:29:37+09:00"
+    "priceUpdatedAt": "2026-03-25T08:02:28+09:00"
   }
 }
