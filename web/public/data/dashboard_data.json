@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-05-10T05:41:18+09:00",
+  "generatedAt": "2026-05-10T06:41:39+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-05-09T17:26:41+09:00",
     "forecastUpdatedAt": "2026-05-09T17:26:41+09:00",
     "priceFallbackCount": 2901
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-05-10T05:41:18+09:00"
+    "priceUpdatedAt": "2026-05-10T06:41:39+09:00"
   },
   "exchangeRate": {
     "value": 1465.5,
@@ -52,11 +52,11 @@
       "name": "비트코인",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 118983000.0,
-      "nativePrice": 118983000.0,
+      "currentPrice": 118953000.0,
+      "nativePrice": 118953000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-05-10",
-      "changePct": 0.71,
+      "changePct": 0.68,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "BTC",
