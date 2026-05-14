@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-05-15T06:39:35+09:00",
+  "generatedAt": "2026-05-15T07:41:07+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-05-14T18:35:01+09:00",
     "forecastUpdatedAt": "2026-05-14T18:35:01+09:00",
     "priceFallbackCount": 2903
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-05-15T06:39:35+09:00"
+    "priceUpdatedAt": "2026-05-15T07:41:07+09:00"
   },
   "exchangeRate": {
     "value": 1493.5,
@@ -33,6 +33,36 @@
       "priceInputMode": "krw"
     },
     {
+      "code": "ALT:BTC",
+      "name": "비트코인",
+      "market": "가상자산",
+      "category": "crypto",
+      "currentPrice": 120360000.0,
+      "nativePrice": 120360000.0,
+      "nativeCurrency": "KRW",
+      "tradedAt": "2026-05-15",
+      "changePct": 2.13,
+      "quantityStep": 1e-06,
+      "quantityPrecision": 6,
+      "unitLabel": "BTC",
+      "priceInputMode": "krw"
+    },
+    {
+      "code": "ALT:ETH",
+      "name": "이더리움",
+      "market": "가상자산",
+      "category": "crypto",
+      "currentPrice": 3398000.0,
+      "nativePrice": 3398000.0,
+      "nativeCurrency": "KRW",
+      "tradedAt": "2026-05-15",
+      "changePct": 1.28,
+      "quantityStep": 1e-06,
+      "quantityPrecision": 6,
+      "unitLabel": "ETH",
+      "priceInputMode": "krw"
+    },
+    {
       "code": "ALT:GLD",
       "name": "금 (GLD)",
       "market": "금",
@@ -46,36 +76,6 @@
       "quantityPrecision": 0,
       "unitLabel": "주",
       "priceInputMode": "usd"
-    },
-    {
-      "code": "ALT:BTC",
-      "name": "비트코인",
-      "market": "가상자산",
-      "category": "crypto",
-      "currentPrice": 120278000.0,
-      "nativePrice": 120278000.0,
-      "nativeCurrency": "KRW",
-      "tradedAt": "2026-05-15",
-      "changePct": 2.06,
-      "quantityStep": 1e-06,
-      "quantityPrecision": 6,
-      "unitLabel": "BTC",
-      "priceInputMode": "krw"
-    },
-    {
-      "code": "ALT:ETH",
-      "name": "이더리움",
-      "market": "가상자산",
-      "category": "crypto",
-      "currentPrice": 3393000.0,
-      "nativePrice": 3393000.0,
-      "nativeCurrency": "KRW",
-      "tradedAt": "2026-05-15",
-      "changePct": 1.13,
-      "quantityStep": 1e-06,
-      "quantityPrecision": 6,
-      "unitLabel": "ETH",
-      "priceInputMode": "krw"
     },
     {
       "code": "ALT:US:MSFT",
