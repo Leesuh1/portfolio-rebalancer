@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-05-30T08:43:55+09:00",
+  "generatedAt": "2026-05-30T11:54:12+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-05-29T19:11:55+09:00",
     "forecastUpdatedAt": "2026-05-25T20:10:56+09:00",
     "priceFallbackCount": 1
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-05-30T08:43:55+09:00"
+    "priceUpdatedAt": "2026-05-30T11:54:12+09:00"
   },
   "exchangeRate": {
     "value": 1507.0,
@@ -52,11 +52,11 @@
       "name": "비트코인",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 108649000.0,
-      "nativePrice": 108649000.0,
+      "currentPrice": 109125000.0,
+      "nativePrice": 109125000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-05-30",
-      "changePct": 0.17,
+      "changePct": 0.31,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "BTC",
@@ -67,11 +67,11 @@
       "name": "이더리움",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 2977000.0,
-      "nativePrice": 2977000.0,
+      "currentPrice": 2990000.0,
+      "nativePrice": 2990000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-05-30",
-      "changePct": 0.47,
+      "changePct": 0.2,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "ETH",
@@ -82,8 +82,8 @@
       "name": "Microsoft",
       "market": "미국주식",
       "category": "us_stock",
-      "currentPrice": 677697.9,
-      "nativePrice": 449.7,
+      "currentPrice": 676673.14,
+      "nativePrice": 449.02,
       "nativeCurrency": "USD",
       "tradedAt": "20260529",
       "changePct": null,
