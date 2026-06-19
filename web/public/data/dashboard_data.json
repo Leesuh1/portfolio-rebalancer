@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-06-20T02:55:16+09:00",
+  "generatedAt": "2026-06-20T04:47:51+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-06-19T19:54:26+09:00",
     "forecastUpdatedAt": "2026-06-15T22:14:02+09:00",
     "priceFallbackCount": 1
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-06-20T02:55:16+09:00"
+    "priceUpdatedAt": "2026-06-20T04:47:51+09:00"
   },
   "exchangeRate": {
     "value": 1533.0,
@@ -37,11 +37,11 @@
       "name": "비트코인",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 95423000.0,
-      "nativePrice": 95423000.0,
+      "currentPrice": 95236000.0,
+      "nativePrice": 95236000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-06-20",
-      "changePct": 0.46,
+      "changePct": 0.26,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "BTC",
@@ -52,11 +52,11 @@
       "name": "이더리움",
       "market": "가상자산",
       "category": "crypto",
-      "currentPrice": 2573000.0,
-      "nativePrice": 2573000.0,
+      "currentPrice": 2569000.0,
+      "nativePrice": 2569000.0,
       "nativeCurrency": "KRW",
       "tradedAt": "2026-06-20",
-      "changePct": -0.35,
+      "changePct": -0.5,
       "quantityStep": 1e-06,
       "quantityPrecision": 6,
       "unitLabel": "ETH",
