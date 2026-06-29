@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-06-30T07:15:42+09:00",
+  "generatedAt": "2026-06-30T08:18:23+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-06-29T20:20:56+09:00",
     "forecastUpdatedAt": "2026-06-27T18:28:36+09:00",
     "priceFallbackCount": 0
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-06-30T07:15:42+09:00"
+    "priceUpdatedAt": "2026-06-30T08:18:23+09:00"
   },
   "exchangeRate": {
-    "value": 1541.0,
+    "value": 1541.5,
     "asOf": "2026-06-29",
     "updatedAt": "2026-06-29 22:09",
-    "changePct": 0.23,
+    "changePct": 0.26,
     "source": "네이버 증권",
     "fallback": false
   },
@@ -22,11 +22,11 @@
       "name": "달러",
       "market": "달러",
       "category": "usd_cash",
-      "currentPrice": 1541.0,
+      "currentPrice": 1541.5,
       "nativePrice": 1,
       "nativeCurrency": "USD",
       "tradedAt": "2026-06-29",
-      "changePct": 0.23,
+      "changePct": 0.26,
       "quantityStep": 0.01,
       "quantityPrecision": 2,
       "unitLabel": "USD",
