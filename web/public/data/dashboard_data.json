@@ -1,17 +1,17 @@
 {
-  "generatedAt": "2026-07-18T03:17:26+09:00",
+  "generatedAt": "2026-07-18T04:36:20+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-07-17T17:24:14+09:00",
     "forecastUpdatedAt": "2026-06-27T18:28:36+09:00",
     "priceFallbackCount": 9
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-07-18T03:17:26+09:00"
+    "priceUpdatedAt": "2026-07-18T04:36:20+09:00"
   },
   "exchangeRate": {
     "value": 1492.0,
     "asOf": "2026-07-18",
-    "updatedAt": "2026-07-18 03:14",
+    "updatedAt": "2026-07-18 04:24",
     "changePct": 0.24,
     "source": "네이버 증권",
     "fallback": false
