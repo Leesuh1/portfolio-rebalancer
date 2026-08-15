@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-08-15T13:06:40+09:00",
+  "generatedAt": "2026-08-15T13:49:59+09:00",
   "domesticDataMeta": {
     "priceUpdatedAt": "2026-08-14T16:45:13+09:00",
     "forecastUpdatedAt": "2026-06-27T18:28:36+09:00",
     "priceFallbackCount": 15
   },
   "externalDataMeta": {
-    "priceUpdatedAt": "2026-08-15T13:06:40+09:00"
+    "priceUpdatedAt": "2026-08-15T13:49:59+09:00"
   },
   "exchangeRate": {
     "value": 1418.5,
