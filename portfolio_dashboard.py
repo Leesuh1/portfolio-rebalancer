@@ -29,7 +29,13 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "outputs"
 WEB_PUBLIC_DATA_DIR = BASE_DIR / "web" / "public" / "data"
-REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 REQUEST_TIMEOUT = 20
 REQUEST_RETRIES = 4
 KST = ZoneInfo("Asia/Seoul")
@@ -178,17 +184,23 @@ def request_with_retry(url: str, method: str = "get", timeout: int = REQUEST_TIM
 
 
 def extract_fnguide_stock_name(html: BeautifulSoup, fallback_code: str) -> str:
-    title_node = html.find("h1")
+    title_node = html.find("h1", id="giName")
     if title_node is not None:
         title_text = title_node.get_text(strip=True)
         if title_text:
             return title_text
 
+    hidden_name = html.find("input", id="cmp_nm")
+    if hidden_name is not None:
+        hidden_value = hidden_name.get("value")
+        if isinstance(hidden_value, str) and hidden_value.strip():
+            return hidden_value.strip()
+
     title_tag = html.find("title")
     if title_tag is not None:
         title_text = title_tag.get_text(strip=True)
         if title_text:
-            return title_text.split("-")[0].strip()
+            return re.sub(r"\s*\(\d{6}\).*$", "", title_text).split("-")[0].strip()
 
     return fallback_code
 
@@ -410,12 +422,97 @@ def get_external_asset_snapshot_with_fallback(
     return exchange_rate, merged_assets
 
 
-def load_fnguide_html(gicode: str) -> BeautifulSoup:
-    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_main.asp?pGB=1&gicode={gicode}"
+def load_fnguide_page(gicode: str, page: str) -> BeautifulSoup:
+    ticker = gicode.removeprefix("A")
+    url = f"https://wcomp.fnguide.com/CompanyInfo/{page}?cmp_cd={ticker}"
     response = request_with_retry(url)
     if response is None:
-        raise ConnectionError(f"FnGuide 요청 실패: {gicode}")
-    return BeautifulSoup(response.text, "html.parser")
+        raise ConnectionError(f"FnGuide {page} 요청 실패: {gicode}")
+    html = BeautifulSoup(response.text, "html.parser")
+    page_code = html.find("input", id="cmp_cd")
+    if page_code is None or page_code.get("value") != ticker:
+        raise ValueError(f"FnGuide {page} 종목 페이지 확인 실패: {gicode}")
+    return html
+
+
+def load_fnguide_html(gicode: str) -> BeautifulSoup:
+    return load_fnguide_page(gicode, "Consensus")
+
+
+def extract_embedded_json(html: BeautifulSoup, variable_name: str) -> dict[str, object] | None:
+    page_text = str(html)
+    match = re.search(rf"\b{re.escape(variable_name)}\s*:\s*", page_text)
+    if match is None:
+        return None
+
+    try:
+        value, _ = json.JSONDecoder().raw_decode(page_text[match.end() :])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def parse_embedded_financials(
+    html: BeautifulSoup,
+    variable_name: str,
+    target_items: list[str],
+) -> tuple[pd.DataFrame, int] | None:
+    payload = extract_embedded_json(html, variable_name)
+    if payload is None:
+        return None
+
+    headers = payload.get("header")
+    rows = payload.get("data")
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return None
+
+    annual_headers: list[tuple[int, str, bool]] = []
+    seen_years: set[int] = set()
+    for header in headers:
+        if not isinstance(header, dict):
+            continue
+        raw_yymm = str(header.get("YYMM") or "")
+        year_match = re.match(r"(\d{4})/12", raw_yymm)
+        value_key = header.get("CD")
+        if year_match is None or not isinstance(value_key, str):
+            continue
+        year = int(year_match.group(1))
+        if year in seen_years:
+            continue
+        seen_years.add(year)
+        annual_headers.append(
+            (year, value_key, str(header.get("EP_CHK") or "").strip() == "E")
+        )
+
+    if not annual_headers:
+        return None
+
+    values_by_item: dict[str, list[float | None]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_name = str(row.get("NAME") or row.get("NM") or "").strip()
+        item = normalize_financial_item(raw_name)
+        if item not in target_items or item in values_by_item:
+            continue
+        values_by_item[item] = [
+            parse_numeric_text("" if row.get(value_key) is None else str(row.get(value_key)))
+            for _, value_key, _ in annual_headers
+        ]
+
+    anchor_key = next((key for key in ["매출액", "영업이익", "당기순이익", "ROE"] if key in values_by_item), None)
+    if anchor_key is None:
+        return None
+
+    years = [year for year, _, _ in annual_headers]
+    yearly_data: dict[str, list[float | None] | list[int]] = {"연도": years}
+    for item in target_items:
+        if item in values_by_item:
+            yearly_data[item] = values_by_item[item]
+
+    estimate_years = [year for year, _, is_estimate in annual_headers if is_estimate]
+    this_year = min(estimate_years) if estimate_years else max(years)
+    return pd.DataFrame(yearly_data), this_year
 
 
 def parse_numeric_text(text: str) -> float | None:
@@ -457,6 +554,10 @@ def get_first_non_null(series: pd.Series | None, default: float | str | None = n
 
 
 def parse_yearly_financials(html: BeautifulSoup, target_items: list[str]) -> tuple[pd.DataFrame, int]:
+    embedded = parse_embedded_financials(html, "perforTrend", target_items)
+    if embedded is not None:
+        return embedded
+
     tables = html.find_all("table", class_="us_table_ty1 h_fix zigbg_no")
     if len(tables) <= 5:
         raise ValueError("연간 재무 테이블 부족")
@@ -671,7 +772,10 @@ def get_market_ranked_snapshot(market: str) -> pd.DataFrame:
             break
         page += 1
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        rows,
+        columns=["ticker", "gicode", "name", "market", "market_cap", "market_rank"],
+    )
 
 
 def get_market_top_gicodes(market: str, top_n: int | None = 30) -> list[str]:
@@ -682,22 +786,34 @@ def get_market_top_gicodes(market: str, top_n: int | None = 30) -> list[str]:
 
 def get_selection_presets() -> dict[str, list[str]]:
     presets = {"기본 관심 종목": get_top30_gicodes()}
+    existing_payload = load_existing_snapshot_payload()
+    existing_presets = existing_payload.get("selectionPresets") if isinstance(existing_payload, dict) else None
+    if not isinstance(existing_presets, dict):
+        existing_presets = {}
+
+    def set_live_or_existing(name: str, live_codes: list[str]) -> None:
+        existing_codes = existing_presets.get(name)
+        if live_codes:
+            presets[name] = live_codes
+        elif isinstance(existing_codes, list):
+            presets[name] = [code for code in existing_codes if isinstance(code, str)]
+
     try:
-        presets["코스피 대표 30개"] = get_market_top_gicodes("KOSPI", top_n=30)
+        set_live_or_existing("코스피 대표 30개", get_market_top_gicodes("KOSPI", top_n=30))
     except Exception:
-        pass
+        set_live_or_existing("코스피 대표 30개", [])
     try:
-        presets["코스닥 대표 20개"] = get_market_top_gicodes("KOSDAQ", top_n=20)
+        set_live_or_existing("코스닥 대표 20개", get_market_top_gicodes("KOSDAQ", top_n=20))
     except Exception:
-        pass
+        set_live_or_existing("코스닥 대표 20개", [])
     try:
-        presets["코스피 전체"] = get_market_gicodes("KOSPI")
+        set_live_or_existing("코스피 전체", get_market_gicodes("KOSPI"))
     except Exception:
-        pass
+        set_live_or_existing("코스피 전체", [])
     try:
-        presets["코스닥 전체"] = get_market_gicodes("KOSDAQ")
+        set_live_or_existing("코스닥 전체", get_market_gicodes("KOSDAQ"))
     except Exception:
-        pass
+        set_live_or_existing("코스닥 전체", [])
     kospi_all = presets.get("코스피 전체", [])
     kosdaq_all = presets.get("코스닥 전체", [])
     if kospi_all or kosdaq_all:
@@ -711,21 +827,39 @@ def build_stock_universe(
     existing_quote_map: dict[str, dict[str, float]] | None = None,
 ) -> pd.DataFrame:
     ranked_frames = [get_market_ranked_snapshot("KOSPI"), get_market_ranked_snapshot("KOSDAQ")]
-    combined_ranked = pd.concat(ranked_frames, ignore_index=True)
-    combined_ranked["통합시총순위"] = combined_ranked["market_cap"].rank(
-        method="first", ascending=False
-    )
+    live_frames = [frame for frame in ranked_frames if not frame.empty]
+    structural_columns = ["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액"]
 
-    market_ranked = combined_ranked.rename(
-        columns={
-            "gicode": "종목코드",
-            "name": "종목명",
-            "market": "시장",
-            "market_rank": "시장시총순위",
-            "market_cap": "시가총액",
-        }
-    )
-    combined = market_ranked[["종목코드", "종목명", "시장", "시장시총순위", "통합시총순위", "시가총액"]].copy()
+    if live_frames:
+        combined_ranked = pd.concat(live_frames, ignore_index=True)
+        combined_ranked["통합시총순위"] = combined_ranked["market_cap"].rank(
+            method="first", ascending=False
+        )
+        market_ranked = combined_ranked.rename(
+            columns={
+                "gicode": "종목코드",
+                "name": "종목명",
+                "market": "시장",
+                "market_rank": "시장시총순위",
+                "market_cap": "시가총액",
+            }
+        )
+        combined = market_ranked[structural_columns].copy()
+    else:
+        combined = pd.DataFrame(columns=structural_columns)
+
+    existing_payload = load_existing_snapshot_payload()
+    existing_rows = existing_payload.get("stockUniverse") if isinstance(existing_payload, dict) else None
+    if isinstance(existing_rows, list) and existing_rows:
+        existing_universe = pd.DataFrame(existing_rows)
+        if all(column in existing_universe.columns for column in structural_columns):
+            combined = pd.concat(
+                [combined, existing_universe[structural_columns]],
+                ignore_index=True,
+            ).drop_duplicates("종목코드", keep="first")
+
+    if combined.empty:
+        raise RuntimeError("국내 종목 유니버스를 가져오지 못했고 재사용할 기존 스냅샷도 없습니다.")
 
     ranked_subset = pd.DataFrame(columns=["종목코드", "현재가", "전일종가", "전일종가대비등락률"])
     if not ranked_df.empty:
@@ -814,13 +948,13 @@ def pick_roe_value(stock_df: pd.DataFrame, calendar_year: int) -> tuple[float | 
     if not current_year.empty:
         value = current_year.iloc[0]["ROE"]
         if pd.notna(value):
-            return float(value), int(calendar_year), "FnGuide 메인 재무테이블 올해 전망"
+            return float(value), int(calendar_year), "FnGuide 올해 전망"
 
     confirmed_year = stock_df[stock_df["연도"] == calendar_year - 1]
     if not confirmed_year.empty:
         value = confirmed_year.iloc[0]["ROE"]
         if pd.notna(value):
-            return float(value), int(calendar_year - 1), "FnGuide 메인 재무테이블 작년 확정"
+            return float(value), int(calendar_year - 1), "FnGuide 작년 확정"
 
     return None, None, None
 
@@ -838,6 +972,13 @@ def run_batch_check(gicodes: list[str] | None = None) -> tuple[pd.DataFrame, lis
             yearly_df, this_year = parse_yearly_financials(
                 html, ["매출액", "영업이익", "영업이익(발표기준)", "당기순이익", "ROE"]
             )
+
+            if "ROE" not in yearly_df.columns:
+                snapshot_html = load_fnguide_page(gicode, "Snapshot")
+                snapshot_financials = parse_embedded_financials(snapshot_html, "snpFinancial", ["ROE"])
+                if snapshot_financials is not None:
+                    roe_df, _ = snapshot_financials
+                    yearly_df = yearly_df.merge(roe_df[["연도", "ROE"]], on="연도", how="left")
 
             operating_forecast, operating_year = pick_forecast_value(yearly_df, "영업이익", calendar_year)
             net_forecast, net_year = pick_forecast_value(yearly_df, "당기순이익", calendar_year)
@@ -901,8 +1042,25 @@ def calc_avg_growth(start: float, end: float, years: int) -> float:
 
 
 def get_market_cap(gicode: str) -> float:
-    html = load_fnguide_html(gicode)
     try:
+        html = load_fnguide_page(gicode, "Snapshot")
+        sector_payload = extract_embedded_json(html, "snpSector")
+        if sector_payload is not None:
+            rows = sector_payload.get("data")
+            if isinstance(rows, list):
+                market_cap_row = next(
+                    (
+                        row
+                        for row in rows
+                        if isinstance(row, dict) and str(row.get("NAME_S") or "").strip() == "시가총액"
+                    ),
+                    None,
+                )
+                if market_cap_row is not None:
+                    market_cap = parse_numeric_text(str(market_cap_row.get("VAL1") or ""))
+                    if market_cap is not None:
+                        return market_cap
+
         cap_label = html.find("th", string="시가총액")
         cap_cell = cap_label.find_next_sibling("td") if cap_label is not None else None
         if cap_cell is None:
@@ -1003,11 +1161,25 @@ def load_existing_quote_snapshot() -> dict[str, dict[str, float]]:
 
 
 def get_finance_ratio_table(gicode: str) -> pd.DataFrame:
-    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_FinanceRatio.asp?pGB=1&gicode={gicode}"
-    response = request_with_retry(url)
-    if response is None:
-        raise ConnectionError(f"재무비율 요청 실패: {gicode}")
-    tables = pd.read_html(StringIO(response.text))
+    html = load_fnguide_page(gicode, "FinanceRatio")
+    payload = extract_embedded_json(html, "rtoAccumulate")
+    if payload is not None:
+        headers = payload.get("header")
+        rows = payload.get("data")
+        if isinstance(headers, list) and isinstance(rows, list):
+            value_keys = [header.get("CD") for header in headers if isinstance(header, dict)]
+            table_rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                table_rows.append(
+                    [str(row.get("NM") or "").strip()]
+                    + [row.get(key) if isinstance(key, str) else None for key in value_keys]
+                )
+            if table_rows:
+                return pd.DataFrame(table_rows)
+
+    tables = pd.read_html(StringIO(str(html)))
     if not tables:
         raise ValueError("재무비율 테이블 없음")
     return tables[0]
@@ -1036,7 +1208,7 @@ def get_quality_metrics(gicode: str) -> dict[str, float | str]:
             "순현금지표 소스": "없음",
         }
 
-    net_debt_ratio = extract_latest_metric(ratio_table, ["순차입금비율"])
+    net_debt_ratio = extract_latest_metric(ratio_table, ["순차입금비율", "순부채비율"])
     debt_ratio = extract_latest_metric(ratio_table, ["부채비율"])
     equity_ratio = extract_latest_metric(ratio_table, ["자기자본비율"])
     roe = extract_latest_metric(ratio_table, ["ROE"])
@@ -1912,7 +2084,12 @@ def main() -> None:
         print(f"price fallback count: {price_fallback_count}")
         return
 
-    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=get_snapshot_batch_gicodes())
+    batch_gicodes = get_snapshot_batch_gicodes()
+    final_df, incomplete_list, incomplete_reasons = run_batch_check(gicodes=batch_gicodes)
+    if final_df.empty or "종목코드" not in final_df.columns:
+        raise RuntimeError(
+            "국내주식 실적 데이터 수집 결과가 비어 있습니다. 기존 스냅샷을 보존하고 갱신을 중단합니다."
+        )
     forecast_updated_at = now_iso
 
     print(f"incomplete stocks: {incomplete_list}")

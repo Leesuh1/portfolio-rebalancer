@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0,20,40 * * * *"
 
+concurrency:
+  group: portfolio-data-refresh
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

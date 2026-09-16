@@ -11,6 +11,10 @@ on:
     - cron: "10,30,50 5 * * 1-5"
     - cron: "10,30,50 6 * * 1-5"
 
+concurrency:
+  group: portfolio-data-refresh
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
